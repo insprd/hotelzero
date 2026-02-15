@@ -1,6 +1,6 @@
 {
   "name": "hotelzero",
-  "version": "1.8.0",
+  "version": "1.10.0",
   "description": "MCP server for searching hotels on Booking.com with 80+ filters",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -15,7 +15,14 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
-    "test": "tsx src/test.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:ui": "vitest --ui",
+    "test:selectors": "vitest run tests/selectors.test.ts",
+    "test:search": "vitest run tests/search.test.ts",
+    "test:details": "vitest run tests/details.test.ts",
+    "test:reviews": "vitest run tests/reviews.test.ts",
+    "test:calendar": "vitest run tests/price-calendar.test.ts",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
@@ -48,7 +55,9 @@
   },
   "devDependencies": {
     "@types/node": "^25.2.3",
+    "@vitest/ui": "^4.0.18",
     "tsx": "^4.21.0",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
   }
 }

@@ -495,6 +495,7 @@ src/
 
 - **Headless Mode**: Runs without visible browser window
 - **Anti-Detection**: Custom user agent and disabled automation flags
+- **User Agent Rotation**: Randomly selects from 14 realistic browser profiles (Chrome, Firefox, Safari, Edge) on each session
 - **Auto-Scrolling**: Loads more results by scrolling the page
 - **Popup Handling**: Automatically dismisses cookie banners and sign-in modals
 

@@ -47,6 +47,37 @@ const DEFAULT_RETRY_CONFIG: RetryConfig = {
 // Sleep helper
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+// User agent pool for rotation - realistic modern browsers across platforms
+const USER_AGENTS = [
+  // Chrome on Windows
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+  // Chrome on macOS
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  // Firefox on Windows
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0",
+  // Firefox on macOS
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:121.0) Gecko/20100101 Firefox/121.0",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0; rv:121.0) Gecko/20100101 Firefox/121.0",
+  // Safari on macOS
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+  // Edge on Windows
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0",
+];
+
+/**
+ * Get a random user agent from the pool
+ */
+function getRandomUserAgent(): string {
+  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+}
+
 // Retry with exponential backoff
 async function retryWithBackoff<T>(
   fn: () => Promise<T>,
@@ -582,10 +613,14 @@ export class HotelBrowser {
   private lastRequestTime: number = 0;
   private minRequestIntervalMs: number = 2000; // Minimum 2 seconds between requests
   private proxyConfig: ProxyConfig | null = null;
+  private currentUserAgent: string = "";
 
   async init(headless: boolean = true, proxy?: ProxyConfig): Promise<void> {
     // Store proxy config for reference
     this.proxyConfig = proxy || null;
+    
+    // Select a random user agent for this session
+    this.currentUserAgent = getRandomUserAgent();
     
     // Build launch options
     const launchOptions: Parameters<typeof chromium.launch>[0] = {
@@ -604,8 +639,7 @@ export class HotelBrowser {
     
     this.browser = await chromium.launch(launchOptions);
     const context = await this.browser.newContext({
-      userAgent:
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      userAgent: this.currentUserAgent,
       viewport: { width: 1280, height: 900 },
     });
     this.page = await context.newPage();
@@ -623,6 +657,20 @@ export class HotelBrowser {
    */
   getProxyServer(): string | null {
     return this.proxyConfig?.server || null;
+  }
+
+  /**
+   * Get the current user agent being used
+   */
+  getUserAgent(): string {
+    return this.currentUserAgent;
+  }
+
+  /**
+   * Get the list of available user agents
+   */
+  static getAvailableUserAgents(): string[] {
+    return [...USER_AGENTS];
   }
 
   async close(): Promise<void> {

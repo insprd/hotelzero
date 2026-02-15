@@ -34,21 +34,29 @@
 ## Completed (v1.8.0)
 - [x] Proxy support for heavy usage via HOTELZERO_PROXY environment variable
 
-## High Value Features
-- [ ] Pagination support (access more than ~25 results) - Partially done via `limit`
+## Completed (v1.9.0)
+- [x] Add automated test suite (Vitest)
+  - [x] Selector health check tests (tests/selectors.test.ts)
+  - [x] Search integration tests (tests/search.test.ts)
+  - [x] Hotel details tests (tests/details.test.ts)
+  - [x] Reviews tests (tests/reviews.test.ts)
+  - [x] Price calendar tests (tests/price-calendar.test.ts)
+
+## Completed (v1.10.0)
+- [x] User agent rotation (random selection from 14 realistic browser profiles)
 
 ## Robustness
 - [x] Proxy support for heavy usage
-- [ ] User agent rotation
+- [x] User agent rotation
 - [ ] Cookie/session management
 
 ## Code Quality
-- [ ] Add automated test suite (Jest/Vitest)
+- [x] Add automated test suite (Jest/Vitest)
 - [ ] Add logging framework (pino/winston)
 - [ ] TypeScript strict mode improvements
 
 ## Documentation
-- [ ] Add CHANGELOG.md
+- [x] Add CHANGELOG.md
 - [ ] Add CONTRIBUTING.md
 - [ ] Expand troubleshooting section
 - [ ] Document full API response schema
