@@ -25,11 +25,13 @@
 ## Completed (v1.5.0)
 - [x] Add `check_availability` tool - Quick availability check for specific dates
 
+## Completed (v1.6.0)
+- [x] Add `get_reviews` tool - Fetch hotel reviews with filtering and sorting
+
 ## High Value Features
 - [ ] Pagination support (access more than ~25 results) - Partially done via `limit`
 
 ## New Tools
-- [ ] `get_reviews` - Fetch hotel reviews
 - [ ] `get_price_calendar` - Find cheapest dates
 
 ## Robustness

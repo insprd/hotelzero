@@ -7,7 +7,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { HotelBrowser, HotelSearchParams, HotelFilters, HotelResult, HotelDetails, AvailabilityResult, RoomOption, HotelSearchError, ErrorCodes } from "./browser.js";
+import { HotelBrowser, HotelSearchParams, HotelFilters, HotelResult, HotelDetails, AvailabilityResult, RoomOption, ReviewsResult, Review, RatingBreakdown, HotelSearchError, ErrorCodes } from "./browser.js";
 
 // Property type enum
 const PropertyTypeEnum = z.enum([
@@ -160,6 +160,13 @@ const CheckAvailabilitySchema = z.object({
   checkOut: z.string().describe("Check-out date (YYYY-MM-DD)"),
   guests: z.number().min(1).max(30).optional().describe("Number of guests (default: 2)"),
   rooms: z.number().min(1).max(10).optional().describe("Number of rooms (default: 1)"),
+});
+
+const GetReviewsSchema = z.object({
+  hotelUrl: z.string().describe("Booking.com hotel URL to get reviews for"),
+  limit: z.number().min(1).max(50).optional().describe("Number of reviews to fetch (default: 10, max: 50)"),
+  sortBy: z.enum(["recent", "highest", "lowest"]).optional().describe("Sort reviews by: recent (default), highest score, or lowest score"),
+  filterBy: z.enum(["couples", "families", "solo", "business", "groups"]).optional().describe("Filter reviews by traveler type"),
 });
 
 // Global browser instance (reuse for efficiency)
@@ -425,11 +432,99 @@ function formatAvailabilityResult(result: AvailabilityResult): string {
   return lines.join("\n");
 }
 
+function formatReviewsResult(result: ReviewsResult): string {
+  const lines: string[] = [];
+  
+  lines.push("=".repeat(60));
+  lines.push(`REVIEWS: ${result.hotelName}`);
+  lines.push("=".repeat(60));
+  lines.push("");
+  
+  // Overall rating
+  if (result.overallRating) {
+    lines.push(`Overall Rating: ${result.overallRating}/10 (${result.totalReviews} reviews)`);
+  } else {
+    lines.push(`Total Reviews: ${result.totalReviews}`);
+  }
+  lines.push("");
+  
+  // Rating breakdown
+  const breakdown = result.ratingBreakdown;
+  const categories = [
+    { label: "Staff", value: breakdown.staff },
+    { label: "Facilities", value: breakdown.facilities },
+    { label: "Cleanliness", value: breakdown.cleanliness },
+    { label: "Comfort", value: breakdown.comfort },
+    { label: "Value for Money", value: breakdown.valueForMoney },
+    { label: "Location", value: breakdown.location },
+    { label: "Free WiFi", value: breakdown.freeWifi },
+  ];
+  
+  const validCategories = categories.filter(c => c.value !== null);
+  if (validCategories.length > 0) {
+    lines.push("--- RATING BREAKDOWN ---");
+    validCategories.forEach(cat => {
+      lines.push(`${cat.label}: ${cat.value}`);
+    });
+    lines.push("");
+  }
+  
+  // Individual reviews
+  if (result.reviews.length > 0) {
+    lines.push(`--- REVIEWS (${result.reviews.length}) ---`);
+    lines.push("");
+    
+    result.reviews.forEach((review, index) => {
+      lines.push(`[${index + 1}] ${review.title || "Review"}`);
+      
+      if (review.rating !== null) {
+        lines.push(`   Score: ${review.rating}/10`);
+      }
+      
+      if (review.country) {
+        lines.push(`   Reviewer: ${review.country}`);
+      }
+      
+      if (review.travelerType) {
+        lines.push(`   Traveler Type: ${review.travelerType}`);
+      }
+      
+      if (review.roomType) {
+        lines.push(`   Room: ${review.roomType}`);
+      }
+      
+      if (review.stayDate || review.nightsStayed) {
+        const stayInfo = [review.stayDate, review.nightsStayed].filter(Boolean).join(" - ");
+        lines.push(`   Stayed: ${stayInfo}`);
+      }
+      
+      if (review.date) {
+        lines.push(`   Reviewed: ${review.date}`);
+      }
+      
+      if (review.positive) {
+        lines.push(`   + ${review.positive}`);
+      }
+      
+      if (review.negative) {
+        lines.push(`   - ${review.negative}`);
+      }
+      
+      lines.push("");
+    });
+  }
+  
+  lines.push("=".repeat(60));
+  lines.push(`Hotel URL: ${result.url}`);
+  
+  return lines.join("\n");
+}
+
 // Create MCP server
 const server = new Server(
   {
     name: "hotelzero",
-    version: "1.5.0",
+    version: "1.6.0",
   },
   {
     capabilities: {
@@ -651,6 +746,20 @@ Results are scored and ranked by how well they match the criteria.`,
           required: ["hotelUrl", "checkIn", "checkOut"],
         },
       },
+      {
+        name: "get_reviews",
+        description: "Get guest reviews for a specific hotel. Returns overall rating, rating breakdown by category (staff, facilities, cleanliness, comfort, value, location, WiFi), and individual reviews with positive/negative comments, reviewer info, and stay details.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            hotelUrl: { type: "string", description: "Booking.com hotel URL to get reviews for" },
+            limit: { type: "number", description: "Number of reviews to fetch (default: 10, max: 50)", minimum: 1, maximum: 50 },
+            sortBy: { type: "string", description: "Sort reviews by", enum: ["recent", "highest", "lowest"] },
+            filterBy: { type: "string", description: "Filter by traveler type", enum: ["couples", "families", "solo", "business", "groups"] },
+          },
+          required: ["hotelUrl"],
+        },
+      },
     ],
   };
 });
@@ -823,6 +932,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
+      case "get_reviews": {
+        const parsed = GetReviewsSchema.parse(args);
+        const result = await b.getReviews(
+          parsed.hotelUrl,
+          parsed.limit,
+          parsed.sortBy,
+          parsed.filterBy
+        );
+        const formatted = formatReviewsResult(result);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: formatted,
+            },
+          ],
+        };
+      }
+
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
@@ -897,7 +1026,7 @@ process.on("SIGTERM", async () => {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("HotelZero v1.5.0 running on stdio");
+  console.error("HotelZero v1.6.0 running on stdio");
 }
 
 main().catch((error) => {

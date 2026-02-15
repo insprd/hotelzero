@@ -326,6 +326,41 @@ export interface AvailabilityResult {
   url: string;
 }
 
+// Individual review from guest
+export interface Review {
+  title: string;
+  rating: number | null;
+  date: string;
+  travelerType: string;
+  country: string;
+  stayDate: string;
+  roomType: string;
+  nightsStayed: string;
+  positive: string;
+  negative: string;
+}
+
+// Rating breakdown by category
+export interface RatingBreakdown {
+  staff: number | null;
+  facilities: number | null;
+  cleanliness: number | null;
+  comfort: number | null;
+  valueForMoney: number | null;
+  location: number | null;
+  freeWifi: number | null;
+}
+
+// Reviews result
+export interface ReviewsResult {
+  hotelName: string;
+  overallRating: number | null;
+  totalReviews: number;
+  ratingBreakdown: RatingBreakdown;
+  reviews: Review[];
+  url: string;
+}
+
 // Booking.com filter code mappings
 const FILTER_CODES = {
   // Property Types
@@ -1905,6 +1940,292 @@ export class HotelBrowser {
       (attempt, error, delayMs) => {
         console.error(
           `Check availability attempt ${attempt} failed: ${error.message}. Retrying in ${Math.round(delayMs / 1000)}s...`
+        );
+      }
+    );
+  }
+
+  /**
+   * Get reviews for a specific hotel
+   */
+  async getReviews(
+    hotelUrl: string,
+    limit: number = 10,
+    sortBy: "recent" | "highest" | "lowest" = "recent",
+    filterBy?: "couples" | "families" | "solo" | "business" | "groups"
+  ): Promise<ReviewsResult> {
+    return retryWithBackoff(
+      async () => {
+        await this.enforceRateLimit();
+        if (!this.page) throw new Error("Browser not initialized");
+        
+        // Navigate to hotel page
+        const cleanUrl = hotelUrl.split("?")[0].split("#")[0];
+        await this.page!.goto(cleanUrl, {
+          waitUntil: "domcontentloaded",
+          timeout: 60000,
+        });
+        await this.page!.waitForTimeout(3000);
+        
+        // Close any popups
+        try {
+          const closeButtons = await this.page!.$$(
+            '[aria-label="Dismiss sign-in info."], [data-testid="dismissButton"], button[aria-label*="close"], button[aria-label*="Close"]'
+          );
+          for (const btn of closeButtons) {
+            try { await btn.click({ timeout: 1000 }); } catch {}
+          }
+        } catch {}
+        await this.page!.keyboard.press("Escape");
+        await this.page!.waitForTimeout(500);
+        
+        // Get overall rating info from main page before opening modal
+        const mainPageData = await this.page!.evaluate(`
+          (function() {
+            var results = { hotelName: '', overallRating: null, totalReviews: 0, breakdown: {} };
+            
+            // Hotel name
+            var nameEl = document.querySelector('h2[class*="pp-header__title"], [data-testid="PropertyHeaderDesktop-wrapper"] h2, h2.d2fee87262');
+            results.hotelName = nameEl?.textContent?.trim() || '';
+            
+            // Overall rating and total reviews from review-score-component
+            var scoreComponent = document.querySelector('[data-testid="review-score-component"]');
+            if (scoreComponent) {
+              var text = scoreComponent.textContent || '';
+              // Extract score (e.g., "Scored 9.1 9.1..." -> 9.1)
+              var scoreMatch = text.match(/Scored\\s+([\\d.]+)/);
+              if (scoreMatch) {
+                results.overallRating = parseFloat(scoreMatch[1]);
+              }
+              // Extract total reviews (e.g., "1,043 reviews")
+              var reviewCountMatch = text.match(/([\\d,]+)\\s+reviews?/);
+              if (reviewCountMatch) {
+                results.totalReviews = parseInt(reviewCountMatch[1].replace(/,/g, ''));
+              }
+            }
+            
+            // Rating breakdown categories
+            var breakdownEls = document.querySelectorAll('[data-testid="review-subscore"]');
+            breakdownEls.forEach(function(el) {
+              var text = el.textContent?.trim() || '';
+              var parts = text.split(/\\s+/);
+              if (parts.length >= 2) {
+                var score = parseFloat(parts[parts.length - 1]);
+                var category = parts.slice(0, -1).join(' ').toLowerCase();
+                if (category.includes('staff')) results.breakdown.staff = score;
+                else if (category.includes('facilities')) results.breakdown.facilities = score;
+                else if (category.includes('cleanliness')) results.breakdown.cleanliness = score;
+                else if (category.includes('comfort')) results.breakdown.comfort = score;
+                else if (category.includes('value') || category.includes('money')) results.breakdown.valueForMoney = score;
+                else if (category.includes('location')) results.breakdown.location = score;
+                else if (category.includes('wifi') || category.includes('wi-fi')) results.breakdown.freeWifi = score;
+              }
+            });
+            
+            return results;
+          })()
+        `) as { hotelName: string; overallRating: number | null; totalReviews: number; breakdown: Record<string, number> };
+        
+        // Click "Read all reviews" button to open reviews modal
+        const readAllBtn = await this.page!.$('[data-testid="fr-read-all-reviews"], [data-testid="review-score-read-all"]');
+        if (!readAllBtn) {
+          throw new Error("Could not find 'Read all reviews' button. Hotel may not have reviews.");
+        }
+        await readAllBtn.click();
+        await this.page!.waitForTimeout(3000);
+        
+        // Apply sort option if not default
+        if (sortBy !== "recent") {
+          try {
+            const sorter = await this.page!.$('[data-testid="reviews-sorter-component"]');
+            if (sorter) {
+              await sorter.click();
+              await this.page!.waitForTimeout(500);
+              
+              // Map our sortBy values to Booking.com's options
+              const sortMap: Record<string, string> = {
+                recent: "Newest first",
+                highest: "Highest scores",
+                lowest: "Lowest scores",
+              };
+              const sortOption = await this.page!.$(`[role="option"]:has-text("${sortMap[sortBy]}")`)
+              if (sortOption) {
+                await sortOption.click();
+                await this.page!.waitForTimeout(2000);
+              }
+            }
+          } catch {}
+        }
+        
+        // Apply traveler type filter if specified
+        if (filterBy) {
+          try {
+            const filterMap: Record<string, string> = {
+              couples: "Couples",
+              families: "Families",
+              solo: "Solo travelers",
+              business: "Business travelers",
+              groups: "Groups of friends",
+            };
+            const filterLabel = await this.page!.$(`[data-testid="customerType"] label:has-text("${filterMap[filterBy]}")`)
+            if (filterLabel) {
+              await filterLabel.click();
+              await this.page!.waitForTimeout(2000);
+            }
+          } catch {}
+        }
+        
+        // Scroll down to ensure reviews are visible
+        await this.page!.evaluate(`
+          (function() {
+            var reviewCards = document.querySelector('[data-testid="review-cards"]');
+            if (reviewCards) {
+              reviewCards.scrollIntoView({ behavior: 'instant', block: 'start' });
+            }
+          })()
+        `);
+        await this.page!.waitForTimeout(1000);
+        
+        // Scroll to load more reviews if needed (up to limit)
+        const targetReviews = Math.min(limit, 50);
+        let currentCount = 0;
+        let scrollAttempts = 0;
+        const maxScrollAttempts = Math.ceil(targetReviews / 10) + 3;
+        
+        while (scrollAttempts < maxScrollAttempts) {
+          const count = await this.page!.evaluate(`
+            document.querySelectorAll('[data-testid="review-card"]').length
+          `) as number;
+          
+          if (count >= targetReviews || count === currentCount) {
+            break;
+          }
+          currentCount = count;
+          
+          // Scroll within the modal/container
+          await this.page!.evaluate(`
+            (function() {
+              var container = document.querySelector('[data-testid="review-list-container"]')
+                || document.querySelector('[role="dialog"]');
+              if (container) {
+                container.scrollTop = container.scrollHeight;
+              }
+              // Also scroll the last review into view
+              var reviews = document.querySelectorAll('[data-testid="review-card"]');
+              if (reviews.length > 0) {
+                reviews[reviews.length - 1].scrollIntoView({ behavior: 'instant', block: 'end' });
+              }
+            })()
+          `);
+          await this.page!.waitForTimeout(1500);
+          scrollAttempts++;
+        }
+        
+        // Extract reviews
+        const reviews = await this.page!.evaluate(`
+          (function() {
+            var reviewCards = document.querySelectorAll('[data-testid="review-card"]');
+            var reviews = [];
+            
+            for (var i = 0; i < reviewCards.length; i++) {
+              var card = reviewCards[i];
+              var review = {};
+              
+              // Title
+              var titleEl = card.querySelector('[data-testid="review-title"]');
+              review.title = titleEl?.textContent?.trim() || '';
+              
+              // Score - extract number from "Scored 10 10"
+              var scoreEl = card.querySelector('[data-testid="review-score"]');
+              var scoreText = scoreEl?.textContent?.trim() || '';
+              var scoreMatch = scoreText.match(/Scored\\s+([\\d.]+)/);
+              review.rating = scoreMatch ? parseFloat(scoreMatch[1]) : null;
+              
+              // Date - remove "Reviewed: " prefix
+              var dateEl = card.querySelector('[data-testid="review-date"]');
+              var dateText = dateEl?.textContent?.trim() || '';
+              review.date = dateText.replace(/^Reviewed:\\s*/i, '');
+              
+              // Traveler type
+              var typeEl = card.querySelector('[data-testid="review-traveler-type"]');
+              review.travelerType = typeEl?.textContent?.trim() || '';
+              
+              // Stay date
+              var stayDateEl = card.querySelector('[data-testid="review-stay-date"]');
+              review.stayDate = stayDateEl?.textContent?.trim() || '';
+              
+              // Room name
+              var roomEl = card.querySelector('[data-testid="review-room-name"]');
+              review.roomType = roomEl?.textContent?.trim() || '';
+              
+              // Num nights
+              var nightsEl = card.querySelector('[data-testid="review-num-nights"]');
+              review.nightsStayed = nightsEl?.textContent?.trim()?.replace(/·/g, '').trim() || '';
+              
+              // Positive
+              var positiveEl = card.querySelector('[data-testid="review-positive-text"]');
+              review.positive = positiveEl?.textContent?.trim() || '';
+              
+              // Negative
+              var negativeEl = card.querySelector('[data-testid="review-negative-text"]');
+              review.negative = negativeEl?.textContent?.trim() || '';
+              
+              // Avatar/country - extract country from text like "JJohn United Kingdom"
+              var avatarEl = card.querySelector('[data-testid="review-avatar"]');
+              var avatarText = avatarEl?.textContent?.trim() || '';
+              // Try to extract country (usually after the name, common patterns)
+              var countryPatterns = [
+                /(?:United Kingdom|United States|Ireland|France|Germany|Spain|Italy|Netherlands|Belgium|Switzerland|Australia|Canada|Sweden|Norway|Denmark|Japan|China|Brazil|Mexico|India|South Korea|Russia|Poland|Austria|Portugal|Greece|Turkey|Czech Republic|Hungary|Romania|Argentina|Chile|Colombia|Thailand|Singapore|Malaysia|Indonesia|Philippines|Vietnam|New Zealand|Finland|Israel|South Africa|Egypt|United Arab Emirates|Saudi Arabia)$/i
+              ];
+              review.country = '';
+              for (var p = 0; p < countryPatterns.length; p++) {
+                var match = avatarText.match(countryPatterns[p]);
+                if (match) {
+                  review.country = match[0];
+                  break;
+                }
+              }
+              // Fallback: take last two words if no country matched
+              if (!review.country && avatarText) {
+                var words = avatarText.split(/\\s+/);
+                if (words.length >= 2) {
+                  review.country = words.slice(-2).join(' ');
+                } else if (words.length === 1) {
+                  review.country = words[0];
+                }
+              }
+              
+              reviews.push(review);
+            }
+            
+            return reviews;
+          })()
+        `) as Review[];
+        
+        // Build rating breakdown with proper null handling
+        const ratingBreakdown: RatingBreakdown = {
+          staff: mainPageData.breakdown.staff ?? null,
+          facilities: mainPageData.breakdown.facilities ?? null,
+          cleanliness: mainPageData.breakdown.cleanliness ?? null,
+          comfort: mainPageData.breakdown.comfort ?? null,
+          valueForMoney: mainPageData.breakdown.valueForMoney ?? null,
+          location: mainPageData.breakdown.location ?? null,
+          freeWifi: mainPageData.breakdown.freeWifi ?? null,
+        };
+        
+        return {
+          hotelName: mainPageData.hotelName,
+          overallRating: mainPageData.overallRating,
+          totalReviews: mainPageData.totalReviews,
+          ratingBreakdown,
+          reviews: reviews.slice(0, limit),
+          url: cleanUrl,
+        };
+      },
+      DEFAULT_RETRY_CONFIG,
+      (attempt, error, delayMs) => {
+        console.error(
+          `Get reviews attempt ${attempt} failed: ${error.message}. Retrying in ${Math.round(delayMs / 1000)}s...`
         );
       }
     );
