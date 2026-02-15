@@ -7,7 +7,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { HotelBrowser, HotelSearchParams, HotelFilters, HotelResult, HotelDetails, AvailabilityResult, RoomOption, ReviewsResult, Review, RatingBreakdown, HotelSearchError, ErrorCodes } from "./browser.js";
+import { HotelBrowser, HotelSearchParams, HotelFilters, HotelResult, HotelDetails, AvailabilityResult, RoomOption, ReviewsResult, Review, RatingBreakdown, PriceCalendarResult, DatePrice, HotelSearchError, ErrorCodes } from "./browser.js";
 
 // Property type enum
 const PropertyTypeEnum = z.enum([
@@ -167,6 +167,15 @@ const GetReviewsSchema = z.object({
   limit: z.number().min(1).max(50).optional().describe("Number of reviews to fetch (default: 10, max: 50)"),
   sortBy: z.enum(["recent", "highest", "lowest"]).optional().describe("Sort reviews by: recent (default), highest score, or lowest score"),
   filterBy: z.enum(["couples", "families", "solo", "business", "groups"]).optional().describe("Filter reviews by traveler type"),
+});
+
+const GetPriceCalendarSchema = z.object({
+  hotelUrl: z.string().describe("Booking.com hotel URL to get prices for"),
+  startDate: z.string().describe("Start date for price calendar (YYYY-MM-DD)"),
+  nights: z.number().min(1).max(30).optional().describe("Number of nights to check (default: 14, max: 30)"),
+  guests: z.number().min(1).max(30).optional().describe("Number of guests (default: 2)"),
+  rooms: z.number().min(1).max(10).optional().describe("Number of rooms (default: 1)"),
+  currency: z.string().optional().describe("Currency code (default: USD)"),
 });
 
 // Global browser instance (reuse for efficiency)
@@ -520,11 +529,81 @@ function formatReviewsResult(result: ReviewsResult): string {
   return lines.join("\n");
 }
 
+function formatPriceCalendarResult(result: PriceCalendarResult): string {
+  const lines: string[] = [];
+  
+  lines.push("=".repeat(60));
+  lines.push(`PRICE CALENDAR: ${result.hotelName}`);
+  lines.push("=".repeat(60));
+  lines.push("");
+  
+  lines.push(`Date Range: ${result.startDate} to ${result.endDate} (${result.nights} nights)`);
+  lines.push(`Currency: ${result.currency}`);
+  lines.push("");
+  
+  // Summary statistics
+  lines.push("--- SUMMARY ---");
+  if (result.lowestPrice !== null) {
+    lines.push(`Lowest Price:  ${result.currency} ${result.lowestPrice} (${result.lowestPriceDate})`);
+  }
+  if (result.highestPrice !== null) {
+    lines.push(`Highest Price: ${result.currency} ${result.highestPrice} (${result.highestPriceDate})`);
+  }
+  if (result.averagePrice !== null) {
+    lines.push(`Average Price: ${result.currency} ${result.averagePrice}`);
+  }
+  
+  const availableCount = result.prices.filter(p => p.available).length;
+  const unavailableCount = result.prices.length - availableCount;
+  lines.push(`Available: ${availableCount}/${result.prices.length} nights`);
+  if (unavailableCount > 0) {
+    lines.push(`Unavailable: ${unavailableCount} nights`);
+  }
+  lines.push("");
+  
+  // Price calendar
+  lines.push("--- PRICES BY DATE ---");
+  
+  // Group by week for better readability
+  let currentWeek: string[] = [];
+  let lastWeekNum = -1;
+  
+  result.prices.forEach((datePrice) => {
+    const date = new Date(datePrice.date);
+    const dayName = date.toLocaleDateString('en-US', { weekday: 'short' });
+    const monthDay = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    
+    let priceStr: string;
+    if (!datePrice.available) {
+      priceStr = "N/A";
+    } else if (datePrice.price !== null) {
+      // Highlight lowest price
+      if (datePrice.price === result.lowestPrice) {
+        priceStr = `${datePrice.priceDisplay} ★ LOWEST`;
+      } else if (datePrice.price === result.highestPrice) {
+        priceStr = `${datePrice.priceDisplay} (highest)`;
+      } else {
+        priceStr = datePrice.priceDisplay;
+      }
+    } else {
+      priceStr = "N/A";
+    }
+    
+    lines.push(`${dayName} ${monthDay}: ${priceStr}`);
+  });
+  
+  lines.push("");
+  lines.push("=".repeat(60));
+  lines.push(`Hotel URL: ${result.url}`);
+  
+  return lines.join("\n");
+}
+
 // Create MCP server
 const server = new Server(
   {
     name: "hotelzero",
-    version: "1.6.0",
+    version: "1.7.0",
   },
   {
     capabilities: {
@@ -760,6 +839,22 @@ Results are scored and ranked by how well they match the criteria.`,
           required: ["hotelUrl"],
         },
       },
+      {
+        name: "get_price_calendar",
+        description: "Get prices for a hotel across multiple dates to find the cheapest time to stay. Shows nightly prices, identifies the lowest/highest price dates, and calculates average pricing. Useful for flexible travelers looking for the best deal.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            hotelUrl: { type: "string", description: "Booking.com hotel URL to check prices for" },
+            startDate: { type: "string", description: "Start date for price calendar (YYYY-MM-DD)" },
+            nights: { type: "number", description: "Number of nights to check (default: 14, max: 30)", minimum: 1, maximum: 30 },
+            guests: { type: "number", description: "Number of guests (default: 2)", minimum: 1, maximum: 30 },
+            rooms: { type: "number", description: "Number of rooms (default: 1)", minimum: 1, maximum: 10 },
+            currency: { type: "string", description: "Currency code (default: USD)" },
+          },
+          required: ["hotelUrl", "startDate"],
+        },
+      },
     ],
   };
 });
@@ -952,6 +1047,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
+      case "get_price_calendar": {
+        const parsed = GetPriceCalendarSchema.parse(args);
+        const result = await b.getPriceCalendar(
+          parsed.hotelUrl,
+          parsed.startDate,
+          parsed.nights,
+          parsed.guests,
+          parsed.rooms,
+          parsed.currency
+        );
+        const formatted = formatPriceCalendarResult(result);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: formatted,
+            },
+          ],
+        };
+      }
+
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
@@ -1026,7 +1143,7 @@ process.on("SIGTERM", async () => {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("HotelZero v1.6.0 running on stdio");
+  console.error("HotelZero v1.7.0 running on stdio");
 }
 
 main().catch((error) => {

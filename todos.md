@@ -28,11 +28,11 @@
 ## Completed (v1.6.0)
 - [x] Add `get_reviews` tool - Fetch hotel reviews with filtering and sorting
 
+## Completed (v1.7.0)
+- [x] Add `get_price_calendar` tool - Find cheapest dates across a date range
+
 ## High Value Features
 - [ ] Pagination support (access more than ~25 results) - Partially done via `limit`
-
-## New Tools
-- [ ] `get_price_calendar` - Find cheapest dates
 
 ## Robustness
 - [ ] Proxy support for heavy usage

@@ -361,6 +361,31 @@ export interface ReviewsResult {
   url: string;
 }
 
+// Price for a specific date
+export interface DatePrice {
+  date: string;           // YYYY-MM-DD
+  price: number | null;   // Lowest price for that night
+  priceDisplay: string;   // Formatted price (e.g., "$241")
+  available: boolean;     // Whether rooms are available
+  currency: string;       // Currency code
+}
+
+// Price calendar result
+export interface PriceCalendarResult {
+  hotelName: string;
+  startDate: string;
+  endDate: string;
+  nights: number;
+  currency: string;
+  prices: DatePrice[];
+  lowestPrice: number | null;
+  lowestPriceDate: string | null;
+  highestPrice: number | null;
+  highestPriceDate: string | null;
+  averagePrice: number | null;
+  url: string;
+}
+
 // Booking.com filter code mappings
 const FILTER_CODES = {
   // Property Types
@@ -2229,5 +2254,211 @@ export class HotelBrowser {
         );
       }
     );
+  }
+
+  /**
+   * Get price calendar for a hotel - shows prices for multiple dates
+   */
+  async getPriceCalendar(
+    hotelUrl: string,
+    startDate: string,
+    nights: number = 14,
+    guests: number = 2,
+    rooms: number = 1,
+    currency: string = "USD"
+  ): Promise<PriceCalendarResult> {
+    // Validate inputs
+    const start = new Date(startDate);
+    if (isNaN(start.getTime())) {
+      throw new Error("Invalid start date format. Use YYYY-MM-DD.");
+    }
+    
+    // Limit to reasonable range
+    const actualNights = Math.min(Math.max(nights, 1), 30);
+    
+    // Generate date range
+    const dates: { checkIn: string; checkOut: string }[] = [];
+    for (let i = 0; i < actualNights; i++) {
+      const checkIn = new Date(start);
+      checkIn.setDate(checkIn.getDate() + i);
+      const checkOut = new Date(checkIn);
+      checkOut.setDate(checkOut.getDate() + 1);
+      
+      dates.push({
+        checkIn: checkIn.toISOString().split("T")[0],
+        checkOut: checkOut.toISOString().split("T")[0],
+      });
+    }
+    
+    // Clean the hotel URL
+    const cleanUrl = hotelUrl.split("?")[0].split("#")[0];
+    
+    // Collect prices for each date
+    const prices: DatePrice[] = [];
+    let hotelName = "";
+    
+    for (const dateRange of dates) {
+      await this.enforceRateLimit();
+      if (!this.page) throw new Error("Browser not initialized");
+      
+      const urlWithDates = `${cleanUrl}?checkin=${dateRange.checkIn}&checkout=${dateRange.checkOut}&group_adults=${guests}&no_rooms=${rooms}&selected_currency=${currency}`;
+      
+      try {
+        await this.page.goto(urlWithDates, {
+          waitUntil: "domcontentloaded",
+          timeout: 30000,
+        });
+        await this.page.waitForTimeout(2000);
+        
+        // Close any popups
+        try {
+          await this.page.keyboard.press("Escape");
+        } catch {}
+        
+        // Extract price data
+        const priceData = await this.page.evaluate(`
+          (function() {
+            var result = { hotelName: '', price: null, priceDisplay: '', available: true, currency: '' };
+            
+            // Get hotel name (only need it once)
+            var nameEl = document.querySelector('h2[class*="pp-header__title"], [data-testid="PropertyHeaderDesktop-wrapper"] h2, h2.d2fee87262');
+            result.hotelName = nameEl?.textContent?.trim() || '';
+            
+            // Check for no availability message
+            var noAvail = document.querySelector('[class*="soldout"], [class*="no-availability"], [data-testid="no-rooms-available"]');
+            if (noAvail) {
+              result.available = false;
+              return result;
+            }
+            
+            // Find the lowest price - look for price elements
+            var priceElements = document.querySelectorAll('[data-testid="price-and-discounted-price"], .bui-price-display__value, .prco-valign-middle-helper');
+            var prices = [];
+            
+            priceElements.forEach(function(el) {
+              var text = el.textContent?.trim() || '';
+              // Extract price number and currency
+              var match = text.match(/([\\$€£¥₹])\\s*([\\d,]+)/);
+              if (match) {
+                var currencySymbol = match[1];
+                var priceNum = parseInt(match[2].replace(/,/g, ''));
+                if (!isNaN(priceNum) && priceNum > 0) {
+                  prices.push({ price: priceNum, display: text.trim(), currency: currencySymbol });
+                }
+              }
+              // Also try format like "241 $" or "241 USD"
+              var match2 = text.match(/([\\d,]+)\\s*([\\$€£¥₹]|USD|EUR|GBP)/);
+              if (match2) {
+                var priceNum2 = parseInt(match2[1].replace(/,/g, ''));
+                if (!isNaN(priceNum2) && priceNum2 > 0) {
+                  prices.push({ price: priceNum2, display: text.trim(), currency: match2[2] });
+                }
+              }
+            });
+            
+            // Get the lowest price
+            if (prices.length > 0) {
+              prices.sort(function(a, b) { return a.price - b.price; });
+              result.price = prices[0].price;
+              result.priceDisplay = prices[0].display;
+              result.currency = prices[0].currency;
+            } else {
+              // Try alternative price selectors
+              var altPrice = document.querySelector('[class*="bui-price-display"], [class*="price"]');
+              if (altPrice) {
+                var altText = altPrice.textContent?.trim() || '';
+                var altMatch = altText.match(/([\\$€£¥₹])\\s*([\\d,]+)/);
+                if (altMatch) {
+                  result.price = parseInt(altMatch[2].replace(/,/g, ''));
+                  result.priceDisplay = altMatch[0];
+                  result.currency = altMatch[1];
+                }
+              }
+            }
+            
+            // If still no price found, might be unavailable
+            if (result.price === null) {
+              result.available = false;
+            }
+            
+            return result;
+          })()
+        `) as { hotelName: string; price: number | null; priceDisplay: string; available: boolean; currency: string };
+        
+        // Store hotel name from first result
+        if (!hotelName && priceData.hotelName) {
+          hotelName = priceData.hotelName;
+        }
+        
+        // Map currency symbol to code
+        const currencyMap: Record<string, string> = {
+          "$": "USD",
+          "€": "EUR",
+          "£": "GBP",
+          "¥": "JPY",
+          "₹": "INR",
+        };
+        const currencyCode = currencyMap[priceData.currency] || priceData.currency || currency;
+        
+        prices.push({
+          date: dateRange.checkIn,
+          price: priceData.price,
+          priceDisplay: priceData.priceDisplay || (priceData.price ? `${priceData.currency}${priceData.price}` : "N/A"),
+          available: priceData.available,
+          currency: currencyCode,
+        });
+        
+      } catch (error) {
+        // If page load fails, mark as unavailable
+        prices.push({
+          date: dateRange.checkIn,
+          price: null,
+          priceDisplay: "Error",
+          available: false,
+          currency,
+        });
+      }
+    }
+    
+    // Calculate statistics
+    const availablePrices = prices.filter(p => p.price !== null && p.available);
+    const priceValues = availablePrices.map(p => p.price as number);
+    
+    let lowestPrice: number | null = null;
+    let lowestPriceDate: string | null = null;
+    let highestPrice: number | null = null;
+    let highestPriceDate: string | null = null;
+    let averagePrice: number | null = null;
+    
+    if (priceValues.length > 0) {
+      lowestPrice = Math.min(...priceValues);
+      highestPrice = Math.max(...priceValues);
+      averagePrice = Math.round(priceValues.reduce((a, b) => a + b, 0) / priceValues.length);
+      
+      const lowestPriceEntry = availablePrices.find(p => p.price === lowestPrice);
+      const highestPriceEntry = availablePrices.find(p => p.price === highestPrice);
+      
+      lowestPriceDate = lowestPriceEntry?.date || null;
+      highestPriceDate = highestPriceEntry?.date || null;
+    }
+    
+    // Calculate end date
+    const endDate = new Date(start);
+    endDate.setDate(endDate.getDate() + actualNights - 1);
+    
+    return {
+      hotelName,
+      startDate,
+      endDate: endDate.toISOString().split("T")[0],
+      nights: actualNights,
+      currency,
+      prices,
+      lowestPrice,
+      lowestPriceDate,
+      highestPrice,
+      highestPriceDate,
+      averagePrice,
+      url: cleanUrl,
+    };
   }
 }
