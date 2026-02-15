@@ -6,7 +6,7 @@
   "types": "dist/index.d.ts",
   "type": "module",
   "bin": {
-    "hotelzero": "./dist/index.js"
+    "hotelzero": "dist/index.js"
   },
   "files": [
     "dist"
