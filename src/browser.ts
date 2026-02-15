@@ -1,5 +1,26 @@
-import { chromium, Browser, Page } from "playwright";
+import { chromium, Browser, Page, BrowserContext } from "playwright";
 import { browserLogger as logger } from "./logger.js";
+import * as fs from "fs";
+import * as path from "path";
+
+// Session/cookie persistence configuration
+const SESSION_PATH = process.env.HOTELZERO_SESSION_PATH || "";
+
+/**
+ * Get the default session file path
+ * Uses ~/.hotelzero/session.json if no custom path is specified
+ */
+function getDefaultSessionPath(): string {
+  const homeDir = process.env.HOME || process.env.USERPROFILE || "";
+  return path.join(homeDir, ".hotelzero", "session.json");
+}
+
+/**
+ * Get the session file path (custom or default)
+ */
+function getSessionPath(): string {
+  return SESSION_PATH || getDefaultSessionPath();
+}
 
 // Proxy configuration
 export interface ProxyConfig {
@@ -610,11 +631,13 @@ const FILTER_CODES = {
 
 export class HotelBrowser {
   private browser: Browser | null = null;
+  private context: BrowserContext | null = null;
   private page: Page | null = null;
   private lastRequestTime: number = 0;
   private minRequestIntervalMs: number = 2000; // Minimum 2 seconds between requests
   private proxyConfig: ProxyConfig | null = null;
   private currentUserAgent: string = "";
+  private sessionPath: string = "";
 
   async init(headless: boolean = true, proxy?: ProxyConfig): Promise<void> {
     // Store proxy config for reference
@@ -623,7 +646,17 @@ export class HotelBrowser {
     // Select a random user agent for this session
     this.currentUserAgent = getRandomUserAgent();
     
-    logger.debug({ headless, hasProxy: !!proxy, userAgent: this.currentUserAgent }, "Initializing browser");
+    // Determine session path
+    this.sessionPath = getSessionPath();
+    const hasExistingSession = this.sessionPath && fs.existsSync(this.sessionPath);
+    
+    logger.debug({ 
+      headless, 
+      hasProxy: !!proxy, 
+      userAgent: this.currentUserAgent,
+      sessionPath: this.sessionPath || "(disabled)",
+      hasExistingSession
+    }, "Initializing browser");
     
     // Build launch options
     const launchOptions: Parameters<typeof chromium.launch>[0] = {
@@ -641,13 +674,98 @@ export class HotelBrowser {
     }
     
     this.browser = await chromium.launch(launchOptions);
-    const context = await this.browser.newContext({
+    
+    // Build context options
+    const contextOptions: Parameters<typeof this.browser.newContext>[0] = {
       userAgent: this.currentUserAgent,
       viewport: { width: 1280, height: 900 },
-    });
-    this.page = await context.newPage();
+    };
     
-    logger.info({ hasProxy: !!proxy }, "Browser initialized successfully");
+    // Load existing session state if available
+    if (hasExistingSession) {
+      try {
+        contextOptions.storageState = this.sessionPath;
+        logger.debug({ sessionPath: this.sessionPath }, "Loading existing session");
+      } catch (error) {
+        logger.warn({ error, sessionPath: this.sessionPath }, "Failed to load session, starting fresh");
+      }
+    }
+    
+    this.context = await this.browser.newContext(contextOptions);
+    this.page = await this.context.newPage();
+    
+    logger.info({ 
+      hasProxy: !!proxy, 
+      sessionLoaded: hasExistingSession 
+    }, "Browser initialized successfully");
+  }
+
+  /**
+   * Save the current session (cookies, localStorage) to disk
+   * Call this after successful requests to persist session state
+   */
+  async saveSession(): Promise<boolean> {
+    if (!this.context || !this.sessionPath) {
+      logger.debug("Cannot save session: no context or session path disabled");
+      return false;
+    }
+    
+    try {
+      // Ensure directory exists
+      const sessionDir = path.dirname(this.sessionPath);
+      if (!fs.existsSync(sessionDir)) {
+        fs.mkdirSync(sessionDir, { recursive: true });
+        logger.debug({ sessionDir }, "Created session directory");
+      }
+      
+      // Save storage state (cookies + localStorage)
+      await this.context.storageState({ path: this.sessionPath });
+      logger.debug({ sessionPath: this.sessionPath }, "Session saved successfully");
+      return true;
+    } catch (error) {
+      logger.warn({ error, sessionPath: this.sessionPath }, "Failed to save session");
+      return false;
+    }
+  }
+
+  /**
+   * Check if session persistence is enabled
+   */
+  hasSessionPath(): boolean {
+    return !!this.sessionPath;
+  }
+
+  /**
+   * Get the current session file path
+   */
+  getSessionPath(): string | null {
+    return this.sessionPath || null;
+  }
+
+  /**
+   * Check if a saved session file exists
+   */
+  static hasExistingSession(): boolean {
+    const sessionPath = getSessionPath();
+    return !!sessionPath && fs.existsSync(sessionPath);
+  }
+
+  /**
+   * Clear the saved session file
+   */
+  static clearSession(): boolean {
+    const sessionPath = getSessionPath();
+    if (sessionPath && fs.existsSync(sessionPath)) {
+      try {
+        fs.unlinkSync(sessionPath);
+        logger.info({ sessionPath }, "Session cleared");
+        return true;
+      } catch (error) {
+        logger.warn({ error, sessionPath }, "Failed to clear session");
+        return false;
+      }
+    }
+    return false;
   }
 
   /**
@@ -682,6 +800,7 @@ export class HotelBrowser {
     if (this.browser) {
       await this.browser.close();
       this.browser = null;
+      this.context = null;
       this.page = null;
       logger.debug("Browser closed");
     }
@@ -1042,10 +1161,14 @@ export class HotelBrowser {
         if (filters) {
           const scored = this.scoreAndFilterHotels(hotels, filters);
           logger.info({ resultCount: scored.length }, "Search completed with filters");
+          // Auto-save session after successful search
+          await this.saveSession();
           return scored;
         }
 
         logger.info({ resultCount: hotels.length }, "Search completed");
+        // Auto-save session after successful search
+        await this.saveSession();
         return hotels;
       },
       DEFAULT_RETRY_CONFIG,
@@ -2052,7 +2175,7 @@ export class HotelBrowser {
           message = `${result.roomOptions.length} room types available${lowestPrice ? ` from ${lowestPriceRoom?.priceDisplay || '$' + lowestPrice}` : ''}.`;
         }
 
-        return {
+        const availabilityResult = {
           available,
           hotelName: result.hotelName,
           checkIn,
@@ -2065,6 +2188,11 @@ export class HotelBrowser {
           message,
           url: urlWithDates,
         };
+
+        // Auto-save session after successful availability check
+        await this.saveSession();
+
+        return availabilityResult;
       },
       DEFAULT_RETRY_CONFIG,
       (attempt, error, delayMs) => {
@@ -2344,7 +2472,7 @@ export class HotelBrowser {
           freeWifi: mainPageData.breakdown.freeWifi ?? null,
         };
         
-        return {
+        const reviewsResult = {
           hotelName: mainPageData.hotelName,
           overallRating: mainPageData.overallRating,
           totalReviews: mainPageData.totalReviews,
@@ -2352,6 +2480,11 @@ export class HotelBrowser {
           reviews: reviews.slice(0, limit),
           url: cleanUrl,
         };
+
+        // Auto-save session after successful reviews fetch
+        await this.saveSession();
+
+        return reviewsResult;
       },
       DEFAULT_RETRY_CONFIG,
       (attempt, error, delayMs) => {
@@ -2553,7 +2686,7 @@ export class HotelBrowser {
     const endDate = new Date(start);
     endDate.setDate(endDate.getDate() + actualNights - 1);
     
-    return {
+    const priceCalendarResult = {
       hotelName,
       startDate,
       endDate: endDate.toISOString().split("T")[0],
@@ -2567,5 +2700,10 @@ export class HotelBrowser {
       averagePrice,
       url: cleanUrl,
     };
+
+    // Auto-save session after successful price calendar fetch
+    await this.saveSession();
+
+    return priceCalendarResult;
   }
 }

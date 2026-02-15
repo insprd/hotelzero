@@ -642,7 +642,7 @@ function formatPriceCalendarResult(result: PriceCalendarResult): string {
 const server = new Server(
   {
     name: "hotelzero",
-    version: "1.11.0",
+    version: "1.12.0",
   },
   {
     capabilities: {

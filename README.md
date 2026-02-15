@@ -81,6 +81,36 @@ Logs are JSON-formatted for easy parsing:
 {"level":"info","time":"2026-02-15T12:00:02.000Z","service":"hotelzero","module":"browser","destination":"Paris","msg":"Starting hotel search"}
 ```
 
+## Session Persistence
+
+HotelZero automatically saves browser session data (cookies, localStorage) to reduce bot detection and avoid repeated CAPTCHA challenges.
+
+### How It Works
+
+- Sessions are automatically saved after each successful request
+- On startup, the previous session is loaded if available
+- Default session location: `~/.hotelzero/session.json`
+
+### Custom Session Path
+
+Use `HOTELZERO_SESSION_PATH` to specify a custom location:
+
+```bash
+# Custom session file location
+HOTELZERO_SESSION_PATH=/path/to/session.json npx hotelzero
+
+# Disable session persistence (use empty string)
+HOTELZERO_SESSION_PATH="" npx hotelzero
+```
+
+### Clearing Sessions
+
+If you experience issues, you can delete the session file:
+
+```bash
+rm ~/.hotelzero/session.json
+```
+
 ## Quick Start
 
 ### Run as MCP Server

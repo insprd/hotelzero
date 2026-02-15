@@ -49,10 +49,15 @@
 - [x] Add pino structured logging framework
 - [x] HOTELZERO_LOG_LEVEL environment variable for log verbosity control
 
+## Completed (v1.12.0)
+- [x] Cookie/session persistence via Playwright storageState
+- [x] Auto-save sessions after successful requests
+- [x] HOTELZERO_SESSION_PATH environment variable for custom session location
+
 ## Robustness
 - [x] Proxy support for heavy usage
 - [x] User agent rotation
-- [ ] Cookie/session management
+- [x] Cookie/session management
 
 ## Code Quality
 - [x] Add automated test suite (Jest/Vitest)

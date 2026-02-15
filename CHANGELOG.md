@@ -2,6 +2,20 @@
 
 All notable changes to HotelZero will be documented in this file.
 
+## [1.12.0] - 2026-02-15
+
+### Added
+- Cookie/session persistence for improved bot detection evasion
+- Sessions are automatically saved after successful requests
+- `HOTELZERO_SESSION_PATH` environment variable to customize session file location
+- Default session storage at `~/.hotelzero/session.json`
+- `HotelBrowser.hasExistingSession()` static method to check for saved sessions
+- `HotelBrowser.clearSession()` static method to clear saved session data
+
+### Changed
+- Browser context now reuses cookies and localStorage from previous sessions
+- Reduced likelihood of CAPTCHA challenges through session continuity
+
 ## [1.11.0] - 2026-02-15
 
 ### Added
