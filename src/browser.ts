@@ -97,7 +97,8 @@ const USER_AGENTS = [
  * Get a random user agent from the pool
  */
 function getRandomUserAgent(): string {
-  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+  const index = Math.floor(Math.random() * USER_AGENTS.length);
+  return USER_AGENTS[index] ?? USER_AGENTS[0]!;
 }
 
 // Retry with exponential backoff
@@ -1286,10 +1287,11 @@ export class HotelBrowser {
         let price: number | null = null;
         
         // First price element is usually per night
-        if (allPriceEls.length > 0) {
-          priceText = allPriceEls[0].textContent?.trim() || "";
+        const firstPriceEl = allPriceEls[0];
+        if (firstPriceEl) {
+          priceText = firstPriceEl.textContent?.trim() || "";
           const priceMatch = priceText.match(/\$?([\d,]+)/);
-          price = priceMatch ? parseInt(priceMatch[1].replace(",", "")) : null;
+          price = priceMatch?.[1] ? parseInt(priceMatch[1].replace(",", "")) : null;
         }
 
         // Rating - look for the numeric score
@@ -1305,7 +1307,7 @@ export class HotelBrowser {
         const reviewCountEl = card.querySelector('[data-testid="review-score"] .fb14de7f14');
         const reviewText = reviewCountEl?.textContent || "";
         const reviewMatch = reviewText.match(/([\d,]+)/);
-        const reviewCount = reviewMatch ? parseInt(reviewMatch[1].replace(",", "")) : null;
+        const reviewCount = reviewMatch?.[1] ? parseInt(reviewMatch[1].replace(",", "")) : null;
 
         // Distance to center
         const distanceEl = card.querySelector('[data-testid="distance"]');
@@ -2219,7 +2221,8 @@ export class HotelBrowser {
         if (!this.page) throw new Error("Browser not initialized");
         
         // Navigate to hotel page
-        const cleanUrl = hotelUrl.split("?")[0].split("#")[0];
+        const urlParts = hotelUrl.split("?")[0];
+        const cleanUrl = urlParts?.split("#")[0] ?? hotelUrl;
         await this.page!.goto(cleanUrl, {
           waitUntil: "domcontentloaded",
           timeout: 60000,
@@ -2524,14 +2527,19 @@ export class HotelBrowser {
       const checkOut = new Date(checkIn);
       checkOut.setDate(checkOut.getDate() + 1);
       
-      dates.push({
-        checkIn: checkIn.toISOString().split("T")[0],
-        checkOut: checkOut.toISOString().split("T")[0],
-      });
+      const checkInStr = checkIn.toISOString().split("T")[0];
+      const checkOutStr = checkOut.toISOString().split("T")[0];
+      if (checkInStr && checkOutStr) {
+        dates.push({
+          checkIn: checkInStr,
+          checkOut: checkOutStr,
+        });
+      }
     }
     
     // Clean the hotel URL
-    const cleanUrl = hotelUrl.split("?")[0].split("#")[0];
+    const urlParts = hotelUrl.split("?")[0];
+    const cleanUrl = urlParts?.split("#")[0] ?? hotelUrl;
     
     // Collect prices for each date
     const prices: DatePrice[] = [];
@@ -2685,11 +2693,12 @@ export class HotelBrowser {
     // Calculate end date
     const endDate = new Date(start);
     endDate.setDate(endDate.getDate() + actualNights - 1);
+    const endDateStr = endDate.toISOString().split("T")[0] ?? startDate;
     
     const priceCalendarResult = {
       hotelName,
       startDate,
-      endDate: endDate.toISOString().split("T")[0],
+      endDate: endDateStr,
       nights: actualNights,
       currency,
       prices,

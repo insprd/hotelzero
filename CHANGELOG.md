@@ -2,6 +2,13 @@
 
 All notable changes to HotelZero will be documented in this file.
 
+## [1.13.0] - 2026-02-15
+
+### Changed
+- Enabled `noUncheckedIndexedAccess` TypeScript compiler option for stricter type safety
+- Fixed all array/object index access to properly handle potentially undefined values
+- Improved null safety throughout the codebase
+
 ## [1.12.0] - 2026-02-15
 
 ### Added

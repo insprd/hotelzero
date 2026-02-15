@@ -54,6 +54,10 @@
 - [x] Auto-save sessions after successful requests
 - [x] HOTELZERO_SESSION_PATH environment variable for custom session location
 
+## Completed (v1.13.0)
+- [x] Enable `noUncheckedIndexedAccess` TypeScript compiler option
+- [x] Fix all array index access patterns for stricter type safety
+
 ## Robustness
 - [x] Proxy support for heavy usage
 - [x] User agent rotation
@@ -62,7 +66,7 @@
 ## Code Quality
 - [x] Add automated test suite (Jest/Vitest)
 - [x] Add logging framework (pino)
-- [ ] TypeScript strict mode improvements
+- [x] TypeScript strict mode improvements (noUncheckedIndexedAccess)
 
 ## Documentation
 - [x] Add CHANGELOG.md

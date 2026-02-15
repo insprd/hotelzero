@@ -349,11 +349,14 @@ function formatHotelComparison(hotels: HotelDetails[]): string {
     
     // Find facilities in all hotels
     const commonFacilities: string[] = [];
-    const firstHotelFacilities = [...hotels[0].popularFacilities, ...hotels[0].allFacilities];
-    for (const facility of firstHotelFacilities) {
-      const lowerFacility = facility.toLowerCase();
-      if (allFacilitySets.every(set => set.has(lowerFacility))) {
-        commonFacilities.push(facility);
+    const firstHotel = hotels[0];
+    if (firstHotel) {
+      const firstHotelFacilities = [...firstHotel.popularFacilities, ...firstHotel.allFacilities];
+      for (const facility of firstHotelFacilities) {
+        const lowerFacility = facility.toLowerCase();
+        if (allFacilitySets.every(set => set.has(lowerFacility))) {
+          commonFacilities.push(facility);
+        }
       }
     }
     
@@ -642,7 +645,7 @@ function formatPriceCalendarResult(result: PriceCalendarResult): string {
 const server = new Server(
   {
     name: "hotelzero",
-    version: "1.12.0",
+    version: "1.13.0",
   },
   {
     capabilities: {
