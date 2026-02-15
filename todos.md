@@ -45,6 +45,10 @@
 ## Completed (v1.10.0)
 - [x] User agent rotation (random selection from 14 realistic browser profiles)
 
+## Completed (v1.11.0)
+- [x] Add pino structured logging framework
+- [x] HOTELZERO_LOG_LEVEL environment variable for log verbosity control
+
 ## Robustness
 - [x] Proxy support for heavy usage
 - [x] User agent rotation
@@ -52,7 +56,7 @@
 
 ## Code Quality
 - [x] Add automated test suite (Jest/Vitest)
-- [ ] Add logging framework (pino/winston)
+- [x] Add logging framework (pino)
 - [ ] TypeScript strict mode improvements
 
 ## Documentation

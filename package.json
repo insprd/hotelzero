@@ -1,6 +1,6 @@
 {
   "name": "hotelzero",
-  "version": "1.10.0",
+  "version": "1.11.0",
   "description": "MCP server for searching hotels on Booking.com with 80+ filters",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -50,6 +50,7 @@
   "homepage": "https://github.com/insprd/hotelzero#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
+    "pino": "^10.3.1",
     "playwright": "^1.58.2",
     "zod": "^4.3.6"
   },

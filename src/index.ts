@@ -8,6 +8,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { HotelBrowser, HotelSearchParams, HotelFilters, HotelResult, HotelDetails, AvailabilityResult, RoomOption, ReviewsResult, Review, RatingBreakdown, PriceCalendarResult, DatePrice, ProxyConfig, HotelSearchError, ErrorCodes } from "./browser.js";
+import { serverLogger as logger } from "./logger.js";
 
 // Property type enum
 const PropertyTypeEnum = z.enum([
@@ -208,7 +209,7 @@ function parseProxyFromEnv(): ProxyConfig | undefined {
     
     return config;
   } catch (error) {
-    console.error(`Invalid HOTELZERO_PROXY format: ${proxyUrl}`);
+    logger.error({ proxyUrl }, "Invalid HOTELZERO_PROXY format");
     return undefined;
   }
 }
@@ -221,7 +222,7 @@ async function getBrowser(): Promise<HotelBrowser> {
     
     // Log proxy status (without credentials)
     if (browser.hasProxy()) {
-      console.error(`Proxy enabled: ${browser.getProxyServer()}`);
+      logger.info({ proxy: browser.getProxyServer() }, "Proxy enabled");
     }
   }
   return browser;
@@ -641,7 +642,7 @@ function formatPriceCalendarResult(result: PriceCalendarResult): string {
 const server = new Server(
   {
     name: "hotelzero",
-    version: "1.8.0",
+    version: "1.11.0",
   },
   {
     capabilities: {
@@ -1181,10 +1182,10 @@ process.on("SIGTERM", async () => {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("HotelZero v1.8.0 running on stdio");
+  logger.info({ version: "1.11.0", transport: "stdio" }, "HotelZero server started");
 }
 
 main().catch((error) => {
-  console.error("Fatal error:", error);
+  logger.fatal({ err: error }, "Fatal error during server startup");
   process.exit(1);
 });

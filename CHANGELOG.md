@@ -2,6 +2,18 @@
 
 All notable changes to HotelZero will be documented in this file.
 
+## [1.11.0] - 2026-02-15
+
+### Added
+- Structured logging using pino
+- `HOTELZERO_LOG_LEVEL` environment variable to control log verbosity
+- Available log levels: trace, debug, info, warn, error, fatal, silent (default: info)
+- Logs output to stderr to avoid interfering with MCP stdio transport
+- Module-specific loggers for browser and server components
+
+### Changed
+- Replaced all `console.error` calls with structured pino logger
+
 ## [1.10.0] - 2026-02-15
 
 ### Added

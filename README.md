@@ -49,6 +49,38 @@ Proxy enabled: http://proxy.example.com:8080
 HotelZero v1.8.0 running on stdio
 ```
 
+## Logging
+
+HotelZero uses structured logging via [pino](https://github.com/pinojs/pino). Logs are written to stderr to avoid interfering with the MCP stdio transport.
+
+### Log Level
+
+Control log verbosity with the `HOTELZERO_LOG_LEVEL` environment variable:
+
+```bash
+# Available levels: trace, debug, info, warn, error, fatal, silent
+# Default: info
+
+# Debug mode - verbose output for troubleshooting
+HOTELZERO_LOG_LEVEL=debug npx hotelzero
+
+# Silent mode - no logs
+HOTELZERO_LOG_LEVEL=silent npx hotelzero
+
+# Error only - minimal output
+HOTELZERO_LOG_LEVEL=error npx hotelzero
+```
+
+### Log Output
+
+Logs are JSON-formatted for easy parsing:
+
+```json
+{"level":"info","time":"2026-02-15T12:00:00.000Z","service":"hotelzero","module":"server","version":"1.11.0","transport":"stdio","msg":"HotelZero server started"}
+{"level":"info","time":"2026-02-15T12:00:01.000Z","service":"hotelzero","module":"browser","msg":"Browser initialized"}
+{"level":"info","time":"2026-02-15T12:00:02.000Z","service":"hotelzero","module":"browser","destination":"Paris","msg":"Starting hotel search"}
+```
+
 ## Quick Start
 
 ### Run as MCP Server

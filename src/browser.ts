@@ -1,4 +1,5 @@
 import { chromium, Browser, Page } from "playwright";
+import { browserLogger as logger } from "./logger.js";
 
 // Proxy configuration
 export interface ProxyConfig {
@@ -622,6 +623,8 @@ export class HotelBrowser {
     // Select a random user agent for this session
     this.currentUserAgent = getRandomUserAgent();
     
+    logger.debug({ headless, hasProxy: !!proxy, userAgent: this.currentUserAgent }, "Initializing browser");
+    
     // Build launch options
     const launchOptions: Parameters<typeof chromium.launch>[0] = {
       headless,
@@ -643,6 +646,8 @@ export class HotelBrowser {
       viewport: { width: 1280, height: 900 },
     });
     this.page = await context.newPage();
+    
+    logger.info({ hasProxy: !!proxy }, "Browser initialized successfully");
   }
 
   /**
@@ -678,6 +683,7 @@ export class HotelBrowser {
       await this.browser.close();
       this.browser = null;
       this.page = null;
+      logger.debug("Browser closed");
     }
   }
 
@@ -967,6 +973,12 @@ export class HotelBrowser {
 
     const url = this.buildBookingUrl(params, filters);
     
+    logger.info(
+      { destination: params.destination, checkIn: params.checkIn, checkOut: params.checkOut, hasFilters: !!filters },
+      "Starting hotel search"
+    );
+    logger.debug({ url }, "Search URL");
+    
     // Use retry with exponential backoff for the main search operation
     return await retryWithBackoff(
       async () => {
@@ -1019,6 +1031,8 @@ export class HotelBrowser {
         // Extract detailed hotel info
         let hotels = await this.extractHotelDetails();
         
+        logger.debug({ hotelCount: hotels.length }, "Hotels extracted from page");
+        
         // Apply limit to cap results
         if (params.limit && params.limit > 0) {
           hotels = hotels.slice(0, params.limit);
@@ -1026,15 +1040,19 @@ export class HotelBrowser {
 
         // Apply client-side filtering and scoring if we have preferences
         if (filters) {
-          return this.scoreAndFilterHotels(hotels, filters);
+          const scored = this.scoreAndFilterHotels(hotels, filters);
+          logger.info({ resultCount: scored.length }, "Search completed with filters");
+          return scored;
         }
 
+        logger.info({ resultCount: hotels.length }, "Search completed");
         return hotels;
       },
       DEFAULT_RETRY_CONFIG,
       (attempt, error, delayMs) => {
-        console.error(
-          `Search attempt ${attempt} failed: ${error.message}. Retrying in ${Math.round(delayMs / 1000)}s...`
+        logger.warn(
+          { attempt, error: error.message, retryInMs: delayMs },
+          "Search attempt failed, retrying"
         );
       }
     );
@@ -1458,8 +1476,9 @@ export class HotelBrowser {
       },
       DEFAULT_RETRY_CONFIG,
       (attempt, error, delayMs) => {
-        console.error(
-          `Get details attempt ${attempt} failed: ${error.message}. Retrying in ${Math.round(delayMs / 1000)}s...`
+        logger.warn(
+          { attempt, error: error.message, retryInMs: delayMs },
+          "Get details attempt failed, retrying"
         );
       }
     );
@@ -1746,8 +1765,9 @@ export class HotelBrowser {
       },
       DEFAULT_RETRY_CONFIG,
       (attempt, error, delayMs) => {
-        console.error(
-          `Get hotel details attempt ${attempt} failed: ${error.message}. Retrying in ${Math.round(delayMs / 1000)}s...`
+        logger.warn(
+          { attempt, error: error.message, retryInMs: delayMs },
+          "Get hotel details for comparison failed, retrying"
         );
       }
     );
@@ -2048,8 +2068,9 @@ export class HotelBrowser {
       },
       DEFAULT_RETRY_CONFIG,
       (attempt, error, delayMs) => {
-        console.error(
-          `Check availability attempt ${attempt} failed: ${error.message}. Retrying in ${Math.round(delayMs / 1000)}s...`
+        logger.warn(
+          { attempt, error: error.message, retryInMs: delayMs },
+          "Check availability attempt failed, retrying"
         );
       }
     );
@@ -2334,8 +2355,9 @@ export class HotelBrowser {
       },
       DEFAULT_RETRY_CONFIG,
       (attempt, error, delayMs) => {
-        console.error(
-          `Get reviews attempt ${attempt} failed: ${error.message}. Retrying in ${Math.round(delayMs / 1000)}s...`
+        logger.warn(
+          { attempt, error: error.message, retryInMs: delayMs },
+          "Get reviews attempt failed, retrying"
         );
       }
     );
