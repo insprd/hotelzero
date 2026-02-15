@@ -1,5 +1,85 @@
 import { chromium, Browser, Page } from "playwright";
 
+// Custom error types for better error handling
+export class HotelSearchError extends Error {
+  constructor(
+    message: string,
+    public code: string,
+    public retryable: boolean = false
+  ) {
+    super(message);
+    this.name = "HotelSearchError";
+  }
+}
+
+export const ErrorCodes = {
+  BROWSER_NOT_INITIALIZED: "BROWSER_NOT_INITIALIZED",
+  NAVIGATION_FAILED: "NAVIGATION_FAILED",
+  RATE_LIMITED: "RATE_LIMITED",
+  CAPTCHA_DETECTED: "CAPTCHA_DETECTED",
+  NO_RESULTS: "NO_RESULTS",
+  DESTINATION_NOT_FOUND: "DESTINATION_NOT_FOUND",
+  NETWORK_ERROR: "NETWORK_ERROR",
+  TIMEOUT: "TIMEOUT",
+  BLOCKED: "BLOCKED",
+} as const;
+
+// Retry configuration
+interface RetryConfig {
+  maxRetries: number;
+  baseDelayMs: number;
+  maxDelayMs: number;
+}
+
+const DEFAULT_RETRY_CONFIG: RetryConfig = {
+  maxRetries: 3,
+  baseDelayMs: 1000,
+  maxDelayMs: 10000,
+};
+
+// Sleep helper
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Retry with exponential backoff
+async function retryWithBackoff<T>(
+  fn: () => Promise<T>,
+  config: RetryConfig = DEFAULT_RETRY_CONFIG,
+  onRetry?: (attempt: number, error: Error, delayMs: number) => void
+): Promise<T> {
+  let lastError: Error | null = null;
+  
+  for (let attempt = 1; attempt <= config.maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error as Error;
+      
+      // Don't retry non-retryable errors
+      if (error instanceof HotelSearchError && !error.retryable) {
+        throw error;
+      }
+      
+      // Don't retry on last attempt
+      if (attempt === config.maxRetries) {
+        break;
+      }
+      
+      // Calculate delay with exponential backoff + jitter
+      const exponentialDelay = config.baseDelayMs * Math.pow(2, attempt - 1);
+      const jitter = Math.random() * 1000;
+      const delay = Math.min(exponentialDelay + jitter, config.maxDelayMs);
+      
+      if (onRetry) {
+        onRetry(attempt, lastError, delay);
+      }
+      
+      await sleep(delay);
+    }
+  }
+  
+  throw lastError;
+}
+
 export interface HotelSearchParams {
   destination: string;
   checkIn: string; // YYYY-MM-DD
@@ -379,6 +459,8 @@ const FILTER_CODES = {
 export class HotelBrowser {
   private browser: Browser | null = null;
   private page: Page | null = null;
+  private lastRequestTime: number = 0;
+  private minRequestIntervalMs: number = 2000; // Minimum 2 seconds between requests
 
   async init(headless: boolean = true): Promise<void> {
     this.browser = await chromium.launch({
@@ -570,32 +652,188 @@ export class HotelBrowser {
     return url.toString();
   }
 
+  // Rate limiting: ensure minimum time between requests
+  private async enforceRateLimit(): Promise<void> {
+    const now = Date.now();
+    const timeSinceLastRequest = now - this.lastRequestTime;
+    
+    if (timeSinceLastRequest < this.minRequestIntervalMs) {
+      const waitTime = this.minRequestIntervalMs - timeSinceLastRequest;
+      await sleep(waitTime);
+    }
+    
+    this.lastRequestTime = Date.now();
+  }
+
+  // Check for CAPTCHA or blocking pages
+  private async checkForBlocking(): Promise<void> {
+    if (!this.page) return;
+
+    const pageContent = await this.page.content();
+    const pageUrl = this.page.url();
+
+    // Check for CAPTCHA
+    const captchaIndicators = [
+      "captcha",
+      "recaptcha",
+      "hcaptcha",
+      "challenge-running",
+      "challenge-form",
+      "px-captcha",
+    ];
+    
+    const hasCaptcha = captchaIndicators.some(
+      indicator => pageContent.toLowerCase().includes(indicator)
+    );
+    
+    if (hasCaptcha) {
+      throw new HotelSearchError(
+        "CAPTCHA detected. Please wait a few minutes before retrying.",
+        ErrorCodes.CAPTCHA_DETECTED,
+        false // Not retryable automatically
+      );
+    }
+
+    // Check for rate limiting / blocking
+    const blockIndicators = [
+      "access denied",
+      "too many requests",
+      "rate limit",
+      "blocked",
+      "forbidden",
+      "error 403",
+      "error 429",
+    ];
+    
+    const isBlocked = blockIndicators.some(
+      indicator => pageContent.toLowerCase().includes(indicator)
+    );
+    
+    if (isBlocked || pageUrl.includes("blocked") || pageUrl.includes("error")) {
+      throw new HotelSearchError(
+        "Request blocked by Booking.com. Please wait a few minutes before retrying.",
+        ErrorCodes.BLOCKED,
+        true // Retryable with backoff
+      );
+    }
+  }
+
+  // Check if destination was found
+  private async checkForNoResults(): Promise<void> {
+    if (!this.page) return;
+
+    const pageContent = await this.page.content();
+    
+    // Check for "no results" or "destination not found" messages
+    const noResultsIndicators = [
+      "no properties found",
+      "no results",
+      "0 properties",
+      "we couldn't find",
+      "try different dates",
+    ];
+    
+    const hasNoResults = noResultsIndicators.some(
+      indicator => pageContent.toLowerCase().includes(indicator)
+    );
+    
+    if (hasNoResults) {
+      // Check if it's a destination issue or just no matching filters
+      const destinationIssue = pageContent.toLowerCase().includes("destination") && 
+        (pageContent.toLowerCase().includes("not found") || 
+         pageContent.toLowerCase().includes("couldn't find"));
+      
+      if (destinationIssue) {
+        throw new HotelSearchError(
+          "Destination not found. Please check the spelling and try again.",
+          ErrorCodes.DESTINATION_NOT_FOUND,
+          false
+        );
+      }
+      
+      // No results but destination is valid - this is not an error, just empty results
+    }
+  }
+
   async searchHotels(
     params: HotelSearchParams,
     filters?: HotelFilters
   ): Promise<HotelResult[]> {
-    if (!this.page) throw new Error("Browser not initialized");
+    if (!this.page) {
+      throw new HotelSearchError(
+        "Browser not initialized. Call init() first.",
+        ErrorCodes.BROWSER_NOT_INITIALIZED,
+        false
+      );
+    }
 
     const url = this.buildBookingUrl(params, filters);
     
-    await this.page.goto(url, { waitUntil: "networkidle" });
-    await this.page.waitForTimeout(2000);
+    // Use retry with exponential backoff for the main search operation
+    return await retryWithBackoff(
+      async () => {
+        // Enforce rate limiting
+        await this.enforceRateLimit();
+        
+        try {
+          await this.page!.goto(url, { 
+            waitUntil: "networkidle",
+            timeout: 30000 
+          });
+        } catch (error) {
+          const err = error as Error;
+          if (err.message.includes("timeout") || err.message.includes("Timeout")) {
+            throw new HotelSearchError(
+              "Page load timed out. The server may be slow or unavailable.",
+              ErrorCodes.TIMEOUT,
+              true
+            );
+          }
+          if (err.message.includes("net::") || err.message.includes("Network")) {
+            throw new HotelSearchError(
+              "Network error occurred. Please check your connection.",
+              ErrorCodes.NETWORK_ERROR,
+              true
+            );
+          }
+          throw new HotelSearchError(
+            `Navigation failed: ${err.message}`,
+            ErrorCodes.NAVIGATION_FAILED,
+            true
+          );
+        }
+        
+        await this.page!.waitForTimeout(2000);
 
-    // Close any popups/modals
-    await this.dismissPopups();
+        // Check for blocking/CAPTCHA before proceeding
+        await this.checkForBlocking();
+        
+        // Check for no results / destination issues
+        await this.checkForNoResults();
 
-    // Scroll to load more results
-    await this.scrollToLoadMore();
+        // Close any popups/modals
+        await this.dismissPopups();
 
-    // Extract detailed hotel info
-    const hotels = await this.extractHotelDetails();
+        // Scroll to load more results
+        await this.scrollToLoadMore();
 
-    // Apply client-side filtering and scoring if we have preferences
-    if (filters) {
-      return this.scoreAndFilterHotels(hotels, filters);
-    }
+        // Extract detailed hotel info
+        const hotels = await this.extractHotelDetails();
 
-    return hotels;
+        // Apply client-side filtering and scoring if we have preferences
+        if (filters) {
+          return this.scoreAndFilterHotels(hotels, filters);
+        }
+
+        return hotels;
+      },
+      DEFAULT_RETRY_CONFIG,
+      (attempt, error, delayMs) => {
+        console.error(
+          `Search attempt ${attempt} failed: ${error.message}. Retrying in ${Math.round(delayMs / 1000)}s...`
+        );
+      }
+    );
   }
 
   private async dismissPopups(): Promise<void> {
@@ -918,40 +1156,83 @@ export class HotelBrowser {
   }
 
   async getHotelDetails(hotelUrl: string): Promise<Record<string, unknown>> {
-    if (!this.page) throw new Error("Browser not initialized");
+    if (!this.page) {
+      throw new HotelSearchError(
+        "Browser not initialized. Call init() first.",
+        ErrorCodes.BROWSER_NOT_INITIALIZED,
+        false
+      );
+    }
 
-    await this.page.goto(hotelUrl, { waitUntil: "networkidle" });
-    await this.page.waitForTimeout(2000);
-    await this.dismissPopups();
+    return await retryWithBackoff(
+      async () => {
+        // Enforce rate limiting
+        await this.enforceRateLimit();
+        
+        try {
+          await this.page!.goto(hotelUrl, { 
+            waitUntil: "networkidle",
+            timeout: 30000 
+          });
+        } catch (error) {
+          const err = error as Error;
+          if (err.message.includes("timeout") || err.message.includes("Timeout")) {
+            throw new HotelSearchError(
+              "Page load timed out. The server may be slow or unavailable.",
+              ErrorCodes.TIMEOUT,
+              true
+            );
+          }
+          throw new HotelSearchError(
+            `Navigation failed: ${err.message}`,
+            ErrorCodes.NAVIGATION_FAILED,
+            true
+          );
+        }
+        
+        await this.page!.waitForTimeout(2000);
+        
+        // Check for blocking/CAPTCHA
+        await this.checkForBlocking();
+        
+        await this.dismissPopups();
 
-    // Extract detailed information from hotel page
-    return await this.page.evaluate(() => {
-      const details: Record<string, unknown> = {};
+        // Extract detailed information from hotel page
+        return await this.page!.evaluate(() => {
+          const details: Record<string, unknown> = {};
 
-      // Hotel name
-      const nameEl = document.querySelector('h2[class*="pp-header"]');
-      details.name = nameEl?.textContent?.trim();
+          // Hotel name
+          const nameEl = document.querySelector('h2[class*="pp-header"]');
+          details.name = nameEl?.textContent?.trim();
 
-      // Description
-      const descEl = document.querySelector('[data-testid="property-description"]');
-      details.description = descEl?.textContent?.trim();
+          // Description
+          const descEl = document.querySelector('[data-testid="property-description"]');
+          details.description = descEl?.textContent?.trim();
 
-      // All facilities
-      const facilityEls = document.querySelectorAll('[data-testid="property-section-facilities"] li');
-      details.facilities = Array.from(facilityEls).map((el) => el.textContent?.trim());
+          // All facilities
+          const facilityEls = document.querySelectorAll('[data-testid="property-section-facilities"] li');
+          details.facilities = Array.from(facilityEls).map((el) => el.textContent?.trim());
 
-      // Photos
-      const photoEls = document.querySelectorAll('[data-testid="gallery-image"] img');
-      details.photos = Array.from(photoEls)
-        .slice(0, 5)
-        .map((el) => (el as HTMLImageElement).src);
+          // Photos
+          const photoEls = document.querySelectorAll('[data-testid="gallery-image"] img');
+          details.photos = Array.from(photoEls)
+            .slice(0, 5)
+            .map((el) => (el as HTMLImageElement).src);
 
-      // Popular facilities highlighted
-      const popularFacilities = document.querySelectorAll('[data-testid="property-most-popular-facilities"] span');
-      details.popularFacilities = Array.from(popularFacilities).map((el) => el.textContent?.trim());
+          // Popular facilities highlighted
+          const popularFacilities = document.querySelectorAll('[data-testid="property-most-popular-facilities"] span');
+          details.popularFacilities = Array.from(popularFacilities).map((el) => el.textContent?.trim());
 
-      return details;
-    });
+          return details;
+        });
+      },
+      DEFAULT_RETRY_CONFIG,
+      (attempt, error, delayMs) => {
+        console.error(
+          `Get details attempt ${attempt} failed: ${error.message}. Retrying in ${Math.round(delayMs / 1000)}s...`
+        );
+      }
+    );
   }
 
   async takeScreenshot(path: string): Promise<void> {

@@ -1,6 +1,6 @@
 # HotelZero - Improvement Roadmap
 
-## Quick Wins (< 2 hours each)
+## Completed (v1.1.0)
 - [x] Fix version mismatch (package.json vs index.ts)
 - [x] Add `minPrice` filter
 - [x] Add `currency` parameter
@@ -10,11 +10,15 @@
 - [x] Move debug files out of src/
 - [x] Add `.npmignore` for dev files
 
+## Completed (v1.2.0)
+- [x] Add retry logic with exponential backoff
+- [x] Add rate limiting protection (2s minimum between requests)
+- [x] Add CAPTCHA detection with helpful error messages
+- [x] Add structured error types (TIMEOUT, NETWORK_ERROR, BLOCKED, etc.)
+
 ## High Value Features
 - [ ] Pagination support (access more than ~25 results)
 - [ ] Compare hotels tool (side-by-side comparison)
-- [ ] Retry logic with exponential backoff
-- [ ] Rate limiting protection
 
 ## New Tools
 - [ ] `compare_hotels` - Compare 2-3 hotels side-by-side
@@ -23,14 +27,12 @@
 - [ ] `get_price_calendar` - Find cheapest dates
 
 ## Robustness
-- [ ] CAPTCHA detection with graceful failure
 - [ ] Proxy support for heavy usage
 - [ ] User agent rotation
 - [ ] Cookie/session management
 
 ## Code Quality
 - [ ] Add automated test suite (Jest/Vitest)
-- [ ] Structured error messages with error types
 - [ ] Add logging framework (pino/winston)
 - [ ] TypeScript strict mode improvements
 

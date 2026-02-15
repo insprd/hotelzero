@@ -7,7 +7,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { HotelBrowser, HotelSearchParams, HotelFilters, HotelResult } from "./browser.js";
+import { HotelBrowser, HotelSearchParams, HotelFilters, HotelResult, HotelSearchError, ErrorCodes } from "./browser.js";
 
 // Property type enum
 const PropertyTypeEnum = z.enum([
@@ -531,6 +531,41 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         throw new Error(`Unknown tool: ${name}`);
     }
   } catch (error) {
+    // Handle custom HotelSearchError with structured error info
+    if (error instanceof HotelSearchError) {
+      let helpText = "";
+      
+      switch (error.code) {
+        case ErrorCodes.CAPTCHA_DETECTED:
+          helpText = "\n\nTip: Wait 5-10 minutes before trying again.";
+          break;
+        case ErrorCodes.RATE_LIMITED:
+        case ErrorCodes.BLOCKED:
+          helpText = "\n\nTip: The server is rate-limiting requests. Wait a few minutes before trying again.";
+          break;
+        case ErrorCodes.DESTINATION_NOT_FOUND:
+          helpText = "\n\nTip: Check the destination spelling. Try a more specific location like 'Paris, France' instead of just 'Paris'.";
+          break;
+        case ErrorCodes.TIMEOUT:
+          helpText = "\n\nTip: The request timed out. This may be due to slow network or server issues. Try again.";
+          break;
+        case ErrorCodes.NETWORK_ERROR:
+          helpText = "\n\nTip: Check your internet connection and try again.";
+          break;
+      }
+      
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error [${error.code}]: ${error.message}${helpText}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+    
+    // Handle generic errors
     const errorMessage = error instanceof Error ? error.message : String(error);
     return {
       content: [
