@@ -6,6 +6,8 @@ export interface HotelSearchParams {
   checkOut: string; // YYYY-MM-DD
   guests: number;
   rooms: number;
+  currency?: string; // Currency code (USD, EUR, GBP, etc.)
+  sortBy?: "popularity" | "price_lowest" | "price_highest" | "rating" | "distance";
 }
 
 // Comprehensive filter interface based on all Booking.com filter codes
@@ -14,7 +16,8 @@ export interface HotelFilters {
   minRating?: number; // 6, 7, 8, or 9 (Pleasant, Good, Very Good, Wonderful)
   
   // === Price ===
-  maxPrice?: number; // Client-side filter
+  minPrice?: number; // Minimum price per night
+  maxPrice?: number; // Maximum price per night
   
   // === Property Type (ht_id) ===
   propertyType?: 
@@ -184,6 +187,8 @@ export interface HotelResult {
   amenities: string[];
   highlights: string[];
   link: string;
+  thumbnailUrl: string | null;
+  availability: string | null; // e.g., "Only 2 rooms left", "Last booked 5 minutes ago"
   matchScore?: number;
   matchReasons?: string[];
 }
@@ -397,7 +402,7 @@ export class HotelBrowser {
   }
 
   private buildBookingUrl(params: HotelSearchParams, filters?: HotelFilters): string {
-    const { destination, checkIn, checkOut, guests, rooms } = params;
+    const { destination, checkIn, checkOut, guests, rooms, currency, sortBy } = params;
     
     const url = new URL("https://www.booking.com/searchresults.html");
     url.searchParams.set("ss", destination);
@@ -405,7 +410,22 @@ export class HotelBrowser {
     url.searchParams.set("checkout", checkOut);
     url.searchParams.set("group_adults", guests.toString());
     url.searchParams.set("no_rooms", rooms.toString());
-    url.searchParams.set("selected_currency", "USD");
+    url.searchParams.set("selected_currency", currency || "USD");
+    
+    // Sort order
+    if (sortBy) {
+      const sortMap: Record<string, string> = {
+        popularity: "popularity",
+        price_lowest: "price",
+        price_highest: "price",
+        rating: "review_score_and_price",
+        distance: "distance_from_search",
+      };
+      url.searchParams.set("order", sortMap[sortBy] || "popularity");
+      if (sortBy === "price_highest") {
+        url.searchParams.set("sort_order", "desc");
+      }
+    }
     
     if (!filters) return url.toString();
     
@@ -720,6 +740,26 @@ export class HotelBrowser {
         if (cardText.includes("free cancellation")) highlights.push("Free Cancellation");
         if (cardText.includes("no prepayment")) highlights.push("No Prepayment");
 
+        // Extract thumbnail image URL
+        const imgEl = card.querySelector('img[data-testid="image"]') as HTMLImageElement;
+        const thumbnailUrl = imgEl?.src || null;
+
+        // Extract availability status (e.g., "Only 2 rooms left", "Last booked 5 minutes ago")
+        let availability: string | null = null;
+        const availabilityPatterns = [
+          /only\s*\d+\s*(rooms?|left)/i,
+          /last\s*(booked|reserved)\s*\d+\s*(minutes?|hours?)\s*ago/i,
+          /in\s*high\s*demand/i,
+          /selling\s*fast/i,
+        ];
+        for (const pattern of availabilityPatterns) {
+          const match = cardText.match(pattern);
+          if (match) {
+            availability = match[0];
+            break;
+          }
+        }
+
         results.push({
           name,
           price,
@@ -732,6 +772,8 @@ export class HotelBrowser {
           amenities,
           highlights,
           link,
+          thumbnailUrl,
+          availability,
         });
       });
 
@@ -862,6 +904,9 @@ export class HotelBrowser {
       .filter((hotel) => {
         // Filter out hotels that don't meet minimum criteria
         if (filters.minRating && hotel.rating && hotel.rating < filters.minRating) {
+          return false;
+        }
+        if (filters.minPrice && hotel.price && hotel.price < filters.minPrice) {
           return false;
         }
         if (filters.maxPrice && hotel.price && hotel.price > filters.maxPrice) {

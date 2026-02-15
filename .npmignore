@@ -1,0 +1,22 @@
+# Development files
+scripts/
+src/
+*.ts
+
+# Debug output
+*.png
+
+# Config files
+tsconfig.json
+todos.md
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log

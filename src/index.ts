@@ -48,9 +48,14 @@ const FindHotelsSchema = z.object({
   guests: z.number().default(2).describe("Number of guests"),
   rooms: z.number().default(1).describe("Number of rooms"),
   
+  // Currency & Sorting
+  currency: z.string().optional().describe("Currency code (USD, EUR, GBP, JPY, etc.)"),
+  sortBy: z.enum(["popularity", "price_lowest", "price_highest", "rating", "distance"]).optional().describe("Sort results by"),
+  
   // Rating & Price
   minRating: z.number().optional().describe("Minimum rating (6=Pleasant, 7=Good, 8=Very Good, 9=Wonderful)"),
-  maxPrice: z.number().optional().describe("Maximum price per night in USD"),
+  minPrice: z.number().optional().describe("Minimum price per night"),
+  maxPrice: z.number().optional().describe("Maximum price per night"),
   
   // Property & Star Rating
   propertyType: PropertyTypeEnum.optional().describe("Type of property (hotel, resort, apartment, villa, etc.)"),
@@ -167,6 +172,10 @@ function formatHotelResult(hotel: HotelResult, index: number): string {
     lines.push(`   Location: ${hotel.distanceToCenter}`);
   }
   
+  if (hotel.availability) {
+    lines.push(`   Availability: ${hotel.availability}`);
+  }
+  
   if (hotel.amenities.length > 0) {
     lines.push(`   Amenities: ${hotel.amenities.join(", ")}`);
   }
@@ -176,6 +185,10 @@ function formatHotelResult(hotel: HotelResult, index: number): string {
     if (hotel.matchReasons && hotel.matchReasons.length > 0) {
       lines.push(`   Why it matches: ${hotel.matchReasons.join(", ")}`);
     }
+  }
+  
+  if (hotel.thumbnailUrl) {
+    lines.push(`   Image: ${hotel.thumbnailUrl}`);
   }
   
   if (hotel.link) {
@@ -190,8 +203,8 @@ function formatHotelResult(hotel: HotelResult, index: number): string {
 // Create MCP server
 const server = new Server(
   {
-    name: "hotel-booking-mcp",
-    version: "2.0.0",
+    name: "hotelzero",
+    version: "1.0.0",
   },
   {
     capabilities: {
@@ -213,7 +226,16 @@ const findHotelsInputSchema = {
     
     // Rating & Price
     minRating: { type: "number", description: "Minimum rating: 6=Pleasant, 7=Good, 8=Very Good, 9=Wonderful" },
-    maxPrice: { type: "number", description: "Maximum price per night in USD" },
+    minPrice: { type: "number", description: "Minimum price per night" },
+    maxPrice: { type: "number", description: "Maximum price per night" },
+    
+    // Currency & Sorting
+    currency: { type: "string", description: "Currency code (USD, EUR, GBP, JPY, etc.)", default: "USD" },
+    sortBy: { 
+      type: "string", 
+      description: "Sort results by",
+      enum: ["popularity", "price_lowest", "price_highest", "rating", "distance"]
+    },
     
     // Property Type
     propertyType: { 
@@ -390,6 +412,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           checkOut: parsed.checkOut,
           guests: parsed.guests,
           rooms: parsed.rooms,
+          currency: parsed.currency,
+          sortBy: parsed.sortBy,
         };
 
         // Build filters object from all parsed parameters
@@ -397,7 +421,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         
         // Copy all filter properties
         const filterKeys = Object.keys(parsed).filter(k => 
-          !['destination', 'checkIn', 'checkOut', 'guests', 'rooms'].includes(k)
+          !['destination', 'checkIn', 'checkOut', 'guests', 'rooms', 'currency', 'sortBy'].includes(k)
         );
         
         for (const key of filterKeys) {
@@ -434,11 +458,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (parsed.starRating) activeFilters.push(`${parsed.starRating}-star`);
         if (parsed.hotelChain) activeFilters.push(parsed.hotelChain);
         if (parsed.minRating) activeFilters.push(`rating ≥${parsed.minRating}`);
+        if (parsed.minPrice) activeFilters.push(`≥$${parsed.minPrice}/night`);
         if (parsed.maxPrice) activeFilters.push(`≤$${parsed.maxPrice}/night`);
         if (parsed.allInclusive) activeFilters.push("all-inclusive");
         if (parsed.snorkeling) activeFilters.push("snorkeling");
         if (parsed.diving) activeFilters.push("diving");
         if (parsed.skiing) activeFilters.push("skiing");
+        if (parsed.currency && parsed.currency !== "USD") activeFilters.push(`currency: ${parsed.currency}`);
+        if (parsed.sortBy) activeFilters.push(`sorted by: ${parsed.sortBy.replace("_", " ")}`);
         
         const filtersLine = activeFilters.length > 0 
           ? `Filters: ${activeFilters.join(", ")}\n\n` 

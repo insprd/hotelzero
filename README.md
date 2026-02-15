@@ -100,13 +100,16 @@ Get detailed information about a specific hotel including full amenity list, des
 | `checkOut` | string | Yes | Check-out date (YYYY-MM-DD) |
 | `guests` | number | No | Number of guests (default: 2) |
 | `rooms` | number | No | Number of rooms (default: 1) |
+| `currency` | string | No | Currency code (USD, EUR, GBP, JPY, etc.) Default: USD |
+| `sortBy` | enum | No | Sort results: `popularity`, `price_lowest`, `price_highest`, `rating`, `distance` |
 
 ### Rating & Price
 
 | Filter | Type | Description |
 |--------|------|-------------|
 | `minRating` | number | Minimum review score: 6=Pleasant, 7=Good, 8=Very Good, 9=Wonderful |
-| `maxPrice` | number | Maximum price per night in USD (client-side filter) |
+| `minPrice` | number | Minimum price per night |
+| `maxPrice` | number | Maximum price per night |
 
 ### Property Type
 
