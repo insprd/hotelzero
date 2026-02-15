@@ -88,6 +88,8 @@ export interface HotelSearchParams {
   rooms: number;
   currency?: string; // Currency code (USD, EUR, GBP, etc.)
   sortBy?: "popularity" | "price_lowest" | "price_highest" | "rating" | "distance";
+  limit?: number; // Max results to return (default: 25, max: 100)
+  offset?: number; // Number of results to skip (for pagination)
 }
 
 // Comprehensive filter interface based on all Booking.com filter codes
@@ -484,7 +486,7 @@ export class HotelBrowser {
   }
 
   private buildBookingUrl(params: HotelSearchParams, filters?: HotelFilters): string {
-    const { destination, checkIn, checkOut, guests, rooms, currency, sortBy } = params;
+    const { destination, checkIn, checkOut, guests, rooms, currency, sortBy, offset } = params;
     
     const url = new URL("https://www.booking.com/searchresults.html");
     url.searchParams.set("ss", destination);
@@ -493,6 +495,11 @@ export class HotelBrowser {
     url.searchParams.set("group_adults", guests.toString());
     url.searchParams.set("no_rooms", rooms.toString());
     url.searchParams.set("selected_currency", currency || "USD");
+    
+    // Pagination offset
+    if (offset && offset > 0) {
+      url.searchParams.set("offset", offset.toString());
+    }
     
     // Sort order
     if (sortBy) {
@@ -814,11 +821,17 @@ export class HotelBrowser {
         // Close any popups/modals
         await this.dismissPopups();
 
-        // Scroll to load more results
-        await this.scrollToLoadMore();
+        // Scroll to load more results (pass limit to control how many to load)
+        const targetResults = params.limit || 25;
+        await this.scrollToLoadMore(targetResults);
 
         // Extract detailed hotel info
-        const hotels = await this.extractHotelDetails();
+        let hotels = await this.extractHotelDetails();
+        
+        // Apply limit to cap results
+        if (params.limit && params.limit > 0) {
+          hotels = hotels.slice(0, params.limit);
+        }
 
         // Apply client-side filtering and scoring if we have preferences
         if (filters) {
@@ -861,15 +874,32 @@ export class HotelBrowser {
     }
   }
 
-  private async scrollToLoadMore(): Promise<void> {
+  private async scrollToLoadMore(targetResults: number = 25): Promise<void> {
     if (!this.page) return;
 
-    // Scroll down a few times to load more results
-    for (let i = 0; i < 3; i++) {
+    // Calculate how many scroll iterations needed
+    // Each scroll typically loads ~15-25 more results
+    // We start with ~25, so to get to targetResults we need (targetResults - 25) / 20 more scrolls
+    const scrollsNeeded = Math.max(1, Math.ceil((targetResults - 25) / 20));
+    const maxScrolls = Math.min(scrollsNeeded, 5); // Cap at 5 scrolls to avoid excessive loading
+
+    // Scroll down to load more results
+    for (let i = 0; i < maxScrolls; i++) {
       await this.page.evaluate(() => {
         window.scrollBy(0, window.innerHeight);
       });
       await this.page.waitForTimeout(1000);
+      
+      // Check if "Load more" button exists and click it
+      try {
+        const loadMoreBtn = await this.page.$('button[data-testid="load-more-results"]');
+        if (loadMoreBtn) {
+          await loadMoreBtn.click();
+          await this.page.waitForTimeout(1500);
+        }
+      } catch {
+        // Ignore if button not found
+      }
     }
 
     // Scroll back to top

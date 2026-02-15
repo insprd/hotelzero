@@ -52,6 +52,10 @@ const FindHotelsSchema = z.object({
   currency: z.string().optional().describe("Currency code (USD, EUR, GBP, JPY, etc.)"),
   sortBy: z.enum(["popularity", "price_lowest", "price_highest", "rating", "distance"]).optional().describe("Sort results by"),
   
+  // Pagination
+  limit: z.number().min(1).max(100).optional().describe("Maximum number of results to return (default: 25, max: 100)"),
+  offset: z.number().min(0).optional().describe("Number of results to skip for pagination (default: 0)"),
+  
   // Rating & Price
   minRating: z.number().optional().describe("Minimum rating (6=Pleasant, 7=Good, 8=Very Good, 9=Wonderful)"),
   minPrice: z.number().optional().describe("Minimum price per night"),
@@ -204,7 +208,7 @@ function formatHotelResult(hotel: HotelResult, index: number): string {
 const server = new Server(
   {
     name: "hotelzero",
-    version: "1.2.0",
+    version: "1.3.0",
   },
   {
     capabilities: {
@@ -236,6 +240,10 @@ const findHotelsInputSchema = {
       description: "Sort results by",
       enum: ["popularity", "price_lowest", "price_highest", "rating", "distance"]
     },
+    
+    // Pagination
+    limit: { type: "number", description: "Maximum results to return (default: 25, max: 100)", default: 25 },
+    offset: { type: "number", description: "Number of results to skip for pagination", default: 0 },
     
     // Property Type
     propertyType: { 
@@ -414,14 +422,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           rooms: parsed.rooms,
           currency: parsed.currency,
           sortBy: parsed.sortBy,
+          limit: parsed.limit,
+          offset: parsed.offset,
         };
 
         // Build filters object from all parsed parameters
         const filters: HotelFilters = {};
         
-        // Copy all filter properties
+        // Copy all filter properties (exclude search params)
         const filterKeys = Object.keys(parsed).filter(k => 
-          !['destination', 'checkIn', 'checkOut', 'guests', 'rooms', 'currency', 'sortBy'].includes(k)
+          !['destination', 'checkIn', 'checkOut', 'guests', 'rooms', 'currency', 'sortBy', 'limit', 'offset'].includes(k)
         );
         
         for (const key of filterKeys) {
@@ -471,16 +481,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ? `Filters: ${activeFilters.join(", ")}\n\n` 
           : "\n";
         
+        // Pagination info
+        const offset = parsed.offset || 0;
+        const displayLimit = parsed.limit || 25;
+        const paginationLine = offset > 0 
+          ? `Showing results ${offset + 1}-${offset + results.length} of available hotels\n\n`
+          : "";
+        
         const hotelList = results
-          .slice(0, 15) // Top 15 results
-          .map((h, i) => formatHotelResult(h, i))
+          .map((h, i) => formatHotelResult(h, i + offset))
           .join("\n\n");
 
         return {
           content: [
             {
               type: "text",
-              text: header + filtersLine + hotelList,
+              text: header + filtersLine + paginationLine + hotelList,
             },
           ],
         };
@@ -601,7 +617,7 @@ process.on("SIGTERM", async () => {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("HotelZero v1.2.0 running on stdio");
+  console.error("HotelZero v1.3.0 running on stdio");
 }
 
 main().catch((error) => {
