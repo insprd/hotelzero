@@ -31,11 +31,14 @@
 ## Completed (v1.7.0)
 - [x] Add `get_price_calendar` tool - Find cheapest dates across a date range
 
+## Completed (v1.8.0)
+- [x] Proxy support for heavy usage via HOTELZERO_PROXY environment variable
+
 ## High Value Features
 - [ ] Pagination support (access more than ~25 results) - Partially done via `limit`
 
 ## Robustness
-- [ ] Proxy support for heavy usage
+- [x] Proxy support for heavy usage
 - [ ] User agent rotation
 - [ ] Cookie/session management
 

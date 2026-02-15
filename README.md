@@ -25,6 +25,30 @@ Or run directly with npx:
 npx hotelzero
 ```
 
+## Proxy Support
+
+For heavy usage or to avoid IP blocks, you can configure a proxy server via the `HOTELZERO_PROXY` environment variable:
+
+```bash
+# HTTP proxy
+HOTELZERO_PROXY=http://proxy.example.com:8080 npx hotelzero
+
+# HTTP proxy with authentication
+HOTELZERO_PROXY=http://user:pass@proxy.example.com:8080 npx hotelzero
+
+# SOCKS5 proxy
+HOTELZERO_PROXY=socks5://proxy.example.com:1080 npx hotelzero
+
+# SOCKS5 proxy with authentication
+HOTELZERO_PROXY=socks5://user:pass@proxy.example.com:1080 npx hotelzero
+```
+
+When a proxy is configured, you'll see confirmation in the startup logs:
+```
+Proxy enabled: http://proxy.example.com:8080
+HotelZero v1.8.0 running on stdio
+```
+
 ## Quick Start
 
 ### Run as MCP Server
@@ -516,6 +540,14 @@ Run `npx playwright install chromium` to install the browser.
 
 - Wait a few minutes before retrying
 - The server uses anti-detection measures, but excessive requests may trigger blocks
+- Consider using a proxy server (see [Proxy Support](#proxy-support))
+
+### Proxy not working
+
+- Verify the proxy server is running and accessible
+- Check credentials if using authentication
+- Ensure the proxy supports HTTPS connections
+- Try a different proxy or test without proxy first
 
 ---
 

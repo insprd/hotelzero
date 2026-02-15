@@ -1,5 +1,12 @@
 import { chromium, Browser, Page } from "playwright";
 
+// Proxy configuration
+export interface ProxyConfig {
+  server: string;           // Proxy server URL (e.g., "http://proxy.example.com:8080" or "socks5://proxy.example.com:1080")
+  username?: string;        // Optional username for authenticated proxies
+  password?: string;        // Optional password for authenticated proxies
+}
+
 // Custom error types for better error handling
 export class HotelSearchError extends Error {
   constructor(
@@ -574,18 +581,48 @@ export class HotelBrowser {
   private page: Page | null = null;
   private lastRequestTime: number = 0;
   private minRequestIntervalMs: number = 2000; // Minimum 2 seconds between requests
+  private proxyConfig: ProxyConfig | null = null;
 
-  async init(headless: boolean = true): Promise<void> {
-    this.browser = await chromium.launch({
+  async init(headless: boolean = true, proxy?: ProxyConfig): Promise<void> {
+    // Store proxy config for reference
+    this.proxyConfig = proxy || null;
+    
+    // Build launch options
+    const launchOptions: Parameters<typeof chromium.launch>[0] = {
       headless,
       args: ["--disable-blink-features=AutomationControlled"],
-    });
+    };
+    
+    // Add proxy to launch options if provided
+    if (proxy) {
+      launchOptions.proxy = {
+        server: proxy.server,
+        username: proxy.username,
+        password: proxy.password,
+      };
+    }
+    
+    this.browser = await chromium.launch(launchOptions);
     const context = await this.browser.newContext({
       userAgent:
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       viewport: { width: 1280, height: 900 },
     });
     this.page = await context.newPage();
+  }
+
+  /**
+   * Check if a proxy is configured
+   */
+  hasProxy(): boolean {
+    return this.proxyConfig !== null;
+  }
+
+  /**
+   * Get the current proxy server (without credentials)
+   */
+  getProxyServer(): string | null {
+    return this.proxyConfig?.server || null;
   }
 
   async close(): Promise<void> {

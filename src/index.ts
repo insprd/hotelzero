@@ -7,7 +7,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { HotelBrowser, HotelSearchParams, HotelFilters, HotelResult, HotelDetails, AvailabilityResult, RoomOption, ReviewsResult, Review, RatingBreakdown, PriceCalendarResult, DatePrice, HotelSearchError, ErrorCodes } from "./browser.js";
+import { HotelBrowser, HotelSearchParams, HotelFilters, HotelResult, HotelDetails, AvailabilityResult, RoomOption, ReviewsResult, Review, RatingBreakdown, PriceCalendarResult, DatePrice, ProxyConfig, HotelSearchError, ErrorCodes } from "./browser.js";
 
 // Property type enum
 const PropertyTypeEnum = z.enum([
@@ -181,10 +181,48 @@ const GetPriceCalendarSchema = z.object({
 // Global browser instance (reuse for efficiency)
 let browser: HotelBrowser | null = null;
 
+/**
+ * Parse proxy configuration from environment variable
+ * Supports formats:
+ *   - http://proxy.example.com:8080
+ *   - http://user:pass@proxy.example.com:8080
+ *   - socks5://proxy.example.com:1080
+ *   - socks5://user:pass@proxy.example.com:1080
+ */
+function parseProxyFromEnv(): ProxyConfig | undefined {
+  const proxyUrl = process.env.HOTELZERO_PROXY;
+  if (!proxyUrl) return undefined;
+  
+  try {
+    const url = new URL(proxyUrl);
+    const config: ProxyConfig = {
+      server: `${url.protocol}//${url.host}`,
+    };
+    
+    if (url.username) {
+      config.username = decodeURIComponent(url.username);
+    }
+    if (url.password) {
+      config.password = decodeURIComponent(url.password);
+    }
+    
+    return config;
+  } catch (error) {
+    console.error(`Invalid HOTELZERO_PROXY format: ${proxyUrl}`);
+    return undefined;
+  }
+}
+
 async function getBrowser(): Promise<HotelBrowser> {
   if (!browser) {
     browser = new HotelBrowser();
-    await browser.init(true);
+    const proxyConfig = parseProxyFromEnv();
+    await browser.init(true, proxyConfig);
+    
+    // Log proxy status (without credentials)
+    if (browser.hasProxy()) {
+      console.error(`Proxy enabled: ${browser.getProxyServer()}`);
+    }
   }
   return browser;
 }
@@ -603,7 +641,7 @@ function formatPriceCalendarResult(result: PriceCalendarResult): string {
 const server = new Server(
   {
     name: "hotelzero",
-    version: "1.7.0",
+    version: "1.8.0",
   },
   {
     capabilities: {
@@ -1143,7 +1181,7 @@ process.on("SIGTERM", async () => {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("HotelZero v1.7.0 running on stdio");
+  console.error("HotelZero v1.8.0 running on stdio");
 }
 
 main().catch((error) => {
