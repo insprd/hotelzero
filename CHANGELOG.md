@@ -2,6 +2,19 @@
 
 All notable changes to HotelZero will be documented in this file.
 
+## [1.14.0] - 2026-02-15
+
+### Added
+- `CONTRIBUTING.md` with development setup, code style guidelines, and PR process
+- Expanded troubleshooting section in README with detailed solutions for common issues
+- Full API response schema documentation in README
+  - `HotelResult` schema for search results
+  - `HotelDetails` schema for detailed hotel info
+  - `AvailabilityResult` and `RoomOption` schemas for availability checks
+  - `ReviewsResult`, `Review`, and `RatingBreakdown` schemas for reviews
+  - `PriceCalendarResult` and `DatePrice` schemas for price calendar
+  - Error response format and error codes
+
 ## [1.13.0] - 2026-02-15
 
 ### Changed

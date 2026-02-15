@@ -645,7 +645,7 @@ function formatPriceCalendarResult(result: PriceCalendarResult): string {
 const server = new Server(
   {
     name: "hotelzero",
-    version: "1.13.0",
+    version: "1.14.0",
   },
   {
     capabilities: {
@@ -1185,7 +1185,7 @@ process.on("SIGTERM", async () => {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  logger.info({ version: "1.11.0", transport: "stdio" }, "HotelZero server started");
+  logger.info({ version: "1.14.0", transport: "stdio" }, "HotelZero server started");
 }
 
 main().catch((error) => {

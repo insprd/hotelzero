@@ -70,6 +70,6 @@
 
 ## Documentation
 - [x] Add CHANGELOG.md
-- [ ] Add CONTRIBUTING.md
-- [ ] Expand troubleshooting section
-- [ ] Document full API response schema
+- [x] Add CONTRIBUTING.md
+- [x] Expand troubleshooting section
+- [x] Document full API response schema

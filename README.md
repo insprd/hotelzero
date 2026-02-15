@@ -593,24 +593,261 @@ const FILTER_CODES = {
 
 Run `npx playwright install chromium` to install the browser.
 
+```bash
+npx playwright install chromium
+```
+
+If that doesn't work, try forcing a reinstall:
+```bash
+npx playwright install chromium --force
+```
+
 ### No results returned
 
-- Check that dates are in the future
-- Verify destination spelling
-- Try removing some filters (too restrictive)
+- **Check dates**: Ensure check-in/check-out dates are in the future
+- **Verify destination**: Try more specific locations like "Paris, France" instead of just "Paris"
+- **Reduce filters**: Too many filters can result in zero matches - try removing some
+- **Check availability**: Some destinations may have no availability for your dates
+
+### CAPTCHA or Access Denied
+
+If you encounter CAPTCHA challenges:
+
+1. **Wait 5-10 minutes** before retrying
+2. **Check your session**: Delete the session file and try again
+   ```bash
+   rm ~/.hotelzero/session.json
+   ```
+3. **Use a proxy**: Consider configuring a proxy server (see [Proxy Support](#proxy-support))
+4. **Reduce request frequency**: Avoid making many rapid requests
 
 ### Blocked by Booking.com
 
-- Wait a few minutes before retrying
-- The server uses anti-detection measures, but excessive requests may trigger blocks
-- Consider using a proxy server (see [Proxy Support](#proxy-support))
+- **Rate limiting**: Wait a few minutes before retrying
+- **Session issues**: Clear the session file (`rm ~/.hotelzero/session.json`)
+- **IP blocked**: Use a proxy server or try from a different network
+- **User agent rotation**: HotelZero rotates user agents automatically, but excessive use from one IP can still trigger blocks
 
 ### Proxy not working
 
-- Verify the proxy server is running and accessible
-- Check credentials if using authentication
-- Ensure the proxy supports HTTPS connections
-- Try a different proxy or test without proxy first
+- **Verify accessibility**: Test the proxy with `curl` first
+  ```bash
+  curl -x http://proxy:8080 https://www.booking.com
+  ```
+- **Check credentials**: Ensure username/password are URL-encoded if they contain special characters
+- **Protocol support**: Ensure the proxy supports HTTPS connections
+- **Connection timeout**: Some proxies may be slow - try a different one
+
+### Prices or Data Missing
+
+- **Dynamic loading**: Some data loads asynchronously; try increasing timeouts
+- **Currency issues**: Specify currency explicitly with `currency: "USD"`
+- **Regional differences**: Some properties may not show prices for certain regions
+
+### Session Issues
+
+If you experience inconsistent behavior:
+
+```bash
+# Clear the session and start fresh
+rm ~/.hotelzero/session.json
+
+# Or disable session persistence entirely
+HOTELZERO_SESSION_PATH="" npx hotelzero
+```
+
+### Debug Mode
+
+Enable debug logging to see detailed information:
+
+```bash
+HOTELZERO_LOG_LEVEL=debug npx hotelzero
+```
+
+This will show:
+- URL being requested
+- Filters being applied
+- Number of results found
+- Any errors or warnings
+
+### Tests Failing
+
+If you're running the test suite and tests fail:
+
+1. **Network issues**: Tests hit live Booking.com - check your connection
+2. **Rate limiting**: Wait a few minutes between test runs
+3. **Selector changes**: Booking.com may have updated their HTML structure
+
+---
+
+## API Response Schema
+
+### HotelResult (from `find_hotels` / `search_hotels`)
+
+```typescript
+interface HotelResult {
+  name: string;                    // Hotel name
+  price: number | null;            // Price per night as number (null if not shown)
+  priceDisplay: string;            // Formatted price string (e.g., "$199")
+  rating: number | null;           // Review score 0-10 (null if no reviews)
+  ratingText: string;              // Rating description (e.g., "Excellent", "Very Good")
+  reviewCount: number | null;      // Number of reviews (null if not shown)
+  location: string;                // Neighborhood/area name
+  distanceToCenter: string;        // Distance from center (e.g., "0.5 miles from center")
+  amenities: string[];             // Detected amenities (e.g., ["Pool", "Free WiFi", "Spa"])
+  highlights: string[];            // Special highlights (e.g., ["Free Cancellation"])
+  link: string;                    // Full Booking.com URL for the hotel
+  thumbnailUrl: string | null;     // Hotel thumbnail image URL (null if not available)
+  availability: string | null;     // Availability status (e.g., "Only 2 rooms left!")
+  matchScore?: number;             // Relevance score based on filters (only with filters)
+  matchReasons?: string[];         // Why this hotel matched (only with filters)
+}
+```
+
+### HotelDetails (from `get_hotel_details` / `compare_hotels`)
+
+```typescript
+interface HotelDetails {
+  name: string;                    // Hotel name
+  url: string;                     // Booking.com URL
+  rating: number | null;           // Review score 0-10
+  ratingText: string;              // Rating description
+  reviewCount: number | null;      // Total number of reviews
+  starRating: number | null;       // Official star rating 1-5
+  address: string;                 // Full address
+  description: string;             // Hotel description text
+  highlights: string;              // Property highlights summary
+  pricePerNight: number | null;    // Price per night as number
+  priceDisplay: string;            // Formatted price per night
+  totalPrice: string;              // Total stay price (formatted)
+  checkInTime: string;             // Check-in time (e.g., "15:00")
+  checkOutTime: string;            // Check-out time (e.g., "11:00")
+  popularFacilities: string[];     // Top facilities list
+  allFacilities: string[];         // Complete facilities list
+  roomTypes: string[];             // Available room type names
+  photos: string[];                // Photo URLs
+  nearbyAttractions: string[];     // Nearby points of interest
+  guestReviewHighlights: string[]; // Notable review excerpts
+  locationInfo: string;            // Location description
+}
+```
+
+### AvailabilityResult (from `check_availability`)
+
+```typescript
+interface AvailabilityResult {
+  available: boolean;              // Whether rooms are available
+  hotelName: string;               // Hotel name
+  checkIn: string;                 // Check-in date (YYYY-MM-DD)
+  checkOut: string;                // Check-out date (YYYY-MM-DD)
+  guests: number;                  // Number of guests searched
+  rooms: number;                   // Number of rooms searched
+  roomOptions: RoomOption[];       // Available room types
+  lowestPrice: number | null;      // Lowest price found
+  lowestPriceDisplay: string;      // Formatted lowest price
+  message: string;                 // Status message
+  url: string;                     // Booking URL with dates
+}
+
+interface RoomOption {
+  name: string;                    // Room type name
+  price: number | null;            // Price as number
+  priceDisplay: string;            // Formatted price
+  sleeps: number | null;           // Maximum occupancy
+  features: string[];              // Room features
+  bedType: string;                 // Bed configuration
+  cancellation: string;            // Cancellation policy
+  breakfast: string;               // Meal plan info
+}
+```
+
+### ReviewsResult (from `get_reviews`)
+
+```typescript
+interface ReviewsResult {
+  hotelName: string;               // Hotel name
+  overallRating: number | null;    // Overall score 0-10
+  totalReviews: number;            // Total review count
+  ratingBreakdown: RatingBreakdown; // Scores by category
+  reviews: Review[];               // Individual reviews
+  url: string;                     // Hotel URL
+}
+
+interface RatingBreakdown {
+  staff: number | null;            // Staff rating
+  facilities: number | null;       // Facilities rating
+  cleanliness: number | null;      // Cleanliness rating
+  comfort: number | null;          // Comfort rating
+  valueForMoney: number | null;    // Value rating
+  location: number | null;         // Location rating
+  freeWifi: number | null;         // WiFi rating
+}
+
+interface Review {
+  title: string;                   // Review title
+  rating: number | null;           // Individual score 0-10
+  date: string;                    // Review date
+  travelerType: string;            // Traveler type (e.g., "Couple", "Family")
+  country: string;                 // Reviewer's country
+  stayDate: string;                // When they stayed
+  roomType: string;                // Room they booked
+  nightsStayed: string;            // Length of stay
+  positive: string;                // Positive comments
+  negative: string;                // Negative comments
+}
+```
+
+### PriceCalendarResult (from `get_price_calendar`)
+
+```typescript
+interface PriceCalendarResult {
+  hotelName: string;               // Hotel name
+  startDate: string;               // Calendar start (YYYY-MM-DD)
+  endDate: string;                 // Calendar end (YYYY-MM-DD)
+  nights: number;                  // Number of nights checked
+  currency: string;                // Currency code
+  prices: DatePrice[];             // Price for each date
+  lowestPrice: number | null;      // Lowest price in range
+  lowestPriceDate: string | null;  // Date with lowest price
+  highestPrice: number | null;     // Highest price in range
+  highestPriceDate: string | null; // Date with highest price
+  averagePrice: number | null;     // Average price
+  url: string;                     // Hotel URL
+}
+
+interface DatePrice {
+  date: string;                    // Date (YYYY-MM-DD)
+  price: number | null;            // Price as number
+  priceDisplay: string;            // Formatted price
+  available: boolean;              // Whether available
+  currency: string;                // Currency code
+}
+```
+
+### Error Response
+
+When an error occurs, the response includes:
+
+```typescript
+interface ErrorResponse {
+  content: [{
+    type: "text";
+    text: string;                  // Error message with code and help text
+  }];
+  isError: true;
+}
+```
+
+Error codes:
+- `BROWSER_NOT_INITIALIZED` - Call init() first
+- `NAVIGATION_FAILED` - Page load failed
+- `RATE_LIMITED` - Too many requests
+- `CAPTCHA_DETECTED` - CAPTCHA challenge encountered
+- `NO_RESULTS` - Search returned no results
+- `DESTINATION_NOT_FOUND` - Invalid destination
+- `NETWORK_ERROR` - Connection issue
+- `TIMEOUT` - Request timed out
+- `BLOCKED` - Access denied by Booking.com
 
 ---
 
