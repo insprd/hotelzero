@@ -2,6 +2,21 @@
 
 All notable changes to HotelZero will be documented in this file.
 
+## [1.15.0] - 2026-02-15
+
+### Added
+- API-based data extraction from Booking.com's Apollo GraphQL cache (`window.__APOLLO_STATE__`)
+- `extractHotelsFromAPI()` method for reliable data extraction without DOM scraping
+- `searchHotelRates()` method for API-based hotel rate lookup
+- New interfaces: `HotelRateFilters`, `HotelRateResult`, `RoomAmenityCategory`
+- `docs/api-analysis.md` documenting the Apollo cache structure
+- `CLAUDE.md` project documentation
+
+### Changed
+- Search now tries API extraction first, falls back to DOM scraping if unavailable
+- Selector tests use clean URLs (stripped query params) for faster, more reliable tests
+- Selector tests use `domcontentloaded` instead of `networkidle` for faster page loads
+
 ## [1.14.0] - 2026-02-15
 
 ### Added
