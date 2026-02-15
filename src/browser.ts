@@ -299,6 +299,33 @@ export interface HotelDetails {
   locationInfo: string;
 }
 
+// Room option from availability check
+export interface RoomOption {
+  name: string;
+  price: number | null;
+  priceDisplay: string;
+  sleeps: number | null;
+  features: string[];
+  bedType: string;
+  cancellation: string;
+  breakfast: string;
+}
+
+// Availability check result
+export interface AvailabilityResult {
+  available: boolean;
+  hotelName: string;
+  checkIn: string;
+  checkOut: string;
+  guests: number;
+  rooms: number;
+  roomOptions: RoomOption[];
+  lowestPrice: number | null;
+  lowestPriceDisplay: string;
+  message: string;
+  url: string;
+}
+
 // Booking.com filter code mappings
 const FILTER_CODES = {
   // Property Types
@@ -1601,5 +1628,285 @@ export class HotelBrowser {
     }
 
     return results;
+  }
+
+  /**
+   * Check availability for a specific hotel on given dates
+   */
+  async checkAvailability(params: {
+    hotelUrl: string;
+    checkIn: string;
+    checkOut: string;
+    guests?: number;
+    rooms?: number;
+  }): Promise<AvailabilityResult> {
+    if (!this.page) {
+      throw new HotelSearchError(
+        "Browser not initialized. Call init() first.",
+        ErrorCodes.BROWSER_NOT_INITIALIZED,
+        false
+      );
+    }
+
+    const { hotelUrl, checkIn, checkOut, guests = 2, rooms = 1 } = params;
+
+    // Validate dates
+    const checkInDate = new Date(checkIn);
+    const checkOutDate = new Date(checkOut);
+    if (isNaN(checkInDate.getTime()) || isNaN(checkOutDate.getTime())) {
+      throw new HotelSearchError(
+        "Invalid date format. Use YYYY-MM-DD.",
+        "INVALID_INPUT",
+        false
+      );
+    }
+    if (checkOutDate <= checkInDate) {
+      throw new HotelSearchError(
+        "Check-out date must be after check-in date.",
+        "INVALID_INPUT",
+        false
+      );
+    }
+
+    return await retryWithBackoff(
+      async () => {
+        await this.enforceRateLimit();
+
+        // Build URL with date parameters
+        // Strip existing query params and add our own
+        const baseUrl = hotelUrl.split("?")[0];
+        const urlWithDates = `${baseUrl}?checkin=${checkIn}&checkout=${checkOut}&group_adults=${guests}&no_rooms=${rooms}&group_children=0`;
+
+        try {
+          await this.page!.goto(urlWithDates, {
+            waitUntil: "networkidle",
+            timeout: 30000,
+          });
+        } catch (error) {
+          const err = error as Error;
+          if (err.message.includes("timeout") || err.message.includes("Timeout")) {
+            throw new HotelSearchError(
+              "Page load timed out.",
+              ErrorCodes.TIMEOUT,
+              true
+            );
+          }
+          throw new HotelSearchError(
+            `Navigation failed: ${err.message}`,
+            ErrorCodes.NAVIGATION_FAILED,
+            true
+          );
+        }
+
+        await this.page!.waitForTimeout(2000);
+        await this.checkForBlocking();
+        await this.dismissPopups();
+
+        // Extract room availability using string-based evaluate
+        const result = await this.page!.evaluate(`
+          (function() {
+            function getText(selector) {
+              var el = document.querySelector(selector);
+              return el && el.textContent ? el.textContent.trim() : "";
+            }
+
+            // Get hotel name
+            var hotelName = getText('h2') || getText('h1').split('(')[0].trim() || "Unknown Hotel";
+
+            var roomOptions = [];
+            var seenRooms = {};
+            
+            // Strategy 1: Look for room type links (most reliable on Booking.com)
+            var roomTypeLinks = document.querySelectorAll('.hprt-roomtype-link, a[class*="hprt-roomtype"]');
+            
+            for (var i = 0; i < roomTypeLinks.length && roomOptions.length < 10; i++) {
+              var roomLink = roomTypeLinks[i];
+              var name = roomLink.textContent.trim();
+              
+              if (!name || name.length < 3 || seenRooms[name]) continue;
+              seenRooms[name] = true;
+              
+              // Find the containing row to get price and details
+              var row = roomLink.closest('tr') || roomLink.closest('[data-block-id]') || roomLink.parentElement;
+              var rowText = row ? row.textContent || "" : "";
+              
+              // Try to find price in the same row or nearby
+              var price = null;
+              var priceDisplay = "";
+              
+              // Look for price cell in this row or next siblings
+              var priceCell = row ? row.querySelector('.hprt-table-cell-price, [class*="price-block"], [class*="bui-price"]') : null;
+              if (priceCell) {
+                priceDisplay = priceCell.textContent.trim();
+                var match = priceDisplay.match(/[\\$€£¥]\\s*([\\d,]+)/);
+                if (match) {
+                  price = parseInt(match[1].replace(/,/g, ""));
+                  // Clean up price display
+                  var perNightMatch = priceDisplay.match(/[\\$€£¥]\\s*[\\d,]+/);
+                  priceDisplay = perNightMatch ? perNightMatch[0] : priceDisplay.split('\\n')[0];
+                }
+              }
+              
+              // If no price found in row, search in sibling rows with same room type
+              if (!price) {
+                var allPriceCells = document.querySelectorAll('.hprt-table-cell-price');
+                for (var j = 0; j < allPriceCells.length && !price; j++) {
+                  var cellText = allPriceCells[j].textContent || "";
+                  var match = cellText.match(/[\\$€£¥]\\s*([\\d,]+)/);
+                  if (match) {
+                    price = parseInt(match[1].replace(/,/g, ""));
+                    priceDisplay = match[0];
+                    break;
+                  }
+                }
+              }
+              
+              // Bed type - clean up multiline text
+              var bedType = "";
+              var bedEl = row ? row.querySelector('.hprt-roomtype-bed, [class*="bed-type"]') : null;
+              if (bedEl) {
+                // Get first meaningful line
+                var bedText = bedEl.textContent || "";
+                var bedLines = bedText.split('\\n').map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
+                // Find line with bed info
+                for (var k = 0; k < bedLines.length; k++) {
+                  if (bedLines[k].match(/(bed|queen|king|twin|double|single|sofa)/i)) {
+                    bedType = bedLines[k];
+                    break;
+                  }
+                }
+                if (!bedType && bedLines.length > 0) {
+                  bedType = bedLines[0];
+                }
+              }
+              
+              // Cancellation
+              var cancellation = "";
+              if (rowText.toLowerCase().indexOf("free cancellation") >= 0) {
+                cancellation = "Free cancellation";
+              } else if (rowText.toLowerCase().indexOf("non-refundable") >= 0) {
+                cancellation = "Non-refundable";
+              }
+              
+              // Breakfast
+              var breakfast = "";
+              if (rowText.toLowerCase().indexOf("breakfast included") >= 0) {
+                breakfast = "Breakfast included";
+              } else if (rowText.toLowerCase().indexOf("room only") >= 0) {
+                breakfast = "Room only";
+              }
+              
+              // Occupancy
+              var sleeps = null;
+              var occupancyEl = row ? row.querySelector('[class*="occupancy"], .hprt-occupancy-occupancy-info') : null;
+              if (occupancyEl) {
+                var occMatch = occupancyEl.textContent.match(/(\\d+)/);
+                sleeps = occMatch ? parseInt(occMatch[1]) : null;
+              }
+              
+              roomOptions.push({
+                name: name,
+                price: price,
+                priceDisplay: priceDisplay,
+                sleeps: sleeps,
+                features: [],
+                bedType: bedType,
+                cancellation: cancellation,
+                breakfast: breakfast
+              });
+            }
+            
+            // Strategy 2: If no rooms found, try data-block-id elements
+            if (roomOptions.length === 0) {
+              var blocks = document.querySelectorAll('[data-block-id]');
+              for (var i = 0; i < blocks.length && roomOptions.length < 10; i++) {
+                var block = blocks[i];
+                var blockText = block.textContent || "";
+                
+                // Look for any room name pattern
+                var nameEl = block.querySelector('a[class*="room"], span[class*="room-name"]');
+                var name = nameEl ? nameEl.textContent.trim() : "";
+                
+                if (!name) {
+                  // Try to extract from block text
+                  var lines = blockText.split('\\n').filter(function(l) { return l.trim().length > 0; });
+                  name = lines[0] ? lines[0].trim().slice(0, 50) : "";
+                }
+                
+                if (!name || name.length < 3 || seenRooms[name]) continue;
+                seenRooms[name] = true;
+                
+                var priceMatch = blockText.match(/[\\$€£¥]\\s*([\\d,]+)/);
+                var price = priceMatch ? parseInt(priceMatch[1].replace(/,/g, "")) : null;
+                
+                roomOptions.push({
+                  name: name,
+                  price: price,
+                  priceDisplay: priceMatch ? priceMatch[0] : "",
+                  sleeps: null,
+                  features: [],
+                  bedType: "",
+                  cancellation: "",
+                  breakfast: ""
+                });
+              }
+            }
+            
+            // Check for "no availability" message
+            var bodyText = document.body.textContent || "";
+            var noAvailability = 
+              bodyText.indexOf("no availability") >= 0 ||
+              bodyText.indexOf("sold out") >= 0 ||
+              bodyText.indexOf("no rooms available") >= 0 ||
+              bodyText.indexOf("fully booked") >= 0 ||
+              bodyText.indexOf("We have no availability") >= 0;
+            
+            return {
+              hotelName: hotelName,
+              roomOptions: roomOptions,
+              noAvailabilityDetected: noAvailability && roomOptions.length === 0
+            };
+          })()
+        `) as { hotelName: string; roomOptions: RoomOption[]; noAvailabilityDetected: boolean };
+
+        // Determine availability and lowest price
+        const available = result.roomOptions.length > 0 && !result.noAvailabilityDetected;
+        const prices = result.roomOptions
+          .map(r => r.price)
+          .filter((p): p is number => p !== null);
+        const lowestPrice = prices.length > 0 ? Math.min(...prices) : null;
+        const lowestPriceRoom = result.roomOptions.find(r => r.price === lowestPrice);
+        
+        // Build message
+        let message: string;
+        if (!available) {
+          message = "No rooms available for the selected dates.";
+        } else if (result.roomOptions.length === 1) {
+          message = `1 room type available${lowestPrice ? ` from ${lowestPriceRoom?.priceDisplay || '$' + lowestPrice}` : ''}.`;
+        } else {
+          message = `${result.roomOptions.length} room types available${lowestPrice ? ` from ${lowestPriceRoom?.priceDisplay || '$' + lowestPrice}` : ''}.`;
+        }
+
+        return {
+          available,
+          hotelName: result.hotelName,
+          checkIn,
+          checkOut,
+          guests,
+          rooms,
+          roomOptions: result.roomOptions,
+          lowestPrice,
+          lowestPriceDisplay: lowestPriceRoom?.priceDisplay || "",
+          message,
+          url: urlWithDates,
+        };
+      },
+      DEFAULT_RETRY_CONFIG,
+      (attempt, error, delayMs) => {
+        console.error(
+          `Check availability attempt ${attempt} failed: ${error.message}. Retrying in ${Math.round(delayMs / 1000)}s...`
+        );
+      }
+    );
   }
 }

@@ -7,7 +7,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { HotelBrowser, HotelSearchParams, HotelFilters, HotelResult, HotelDetails, HotelSearchError, ErrorCodes } from "./browser.js";
+import { HotelBrowser, HotelSearchParams, HotelFilters, HotelResult, HotelDetails, AvailabilityResult, RoomOption, HotelSearchError, ErrorCodes } from "./browser.js";
 
 // Property type enum
 const PropertyTypeEnum = z.enum([
@@ -152,6 +152,14 @@ const HotelDetailsSchema = z.object({
 
 const CompareHotelsSchema = z.object({
   urls: z.array(z.string()).min(2).max(3).describe("Array of 2-3 Booking.com hotel URLs to compare"),
+});
+
+const CheckAvailabilitySchema = z.object({
+  hotelUrl: z.string().describe("Booking.com hotel URL to check availability for"),
+  checkIn: z.string().describe("Check-in date (YYYY-MM-DD)"),
+  checkOut: z.string().describe("Check-out date (YYYY-MM-DD)"),
+  guests: z.number().min(1).max(30).optional().describe("Number of guests (default: 2)"),
+  rooms: z.number().min(1).max(10).optional().describe("Number of rooms (default: 1)"),
 });
 
 // Global browser instance (reuse for efficiency)
@@ -359,11 +367,69 @@ function formatHotelComparison(hotels: HotelDetails[]): string {
   return lines.join("\n");
 }
 
+function formatAvailabilityResult(result: AvailabilityResult): string {
+  const lines: string[] = [];
+  
+  lines.push("=".repeat(60));
+  lines.push("AVAILABILITY CHECK");
+  lines.push("=".repeat(60));
+  lines.push("");
+  
+  lines.push(`Hotel: ${result.hotelName}`);
+  lines.push(`Dates: ${result.checkIn} to ${result.checkOut}`);
+  lines.push(`Guests: ${result.guests} | Rooms: ${result.rooms}`);
+  lines.push("");
+  
+  if (!result.available) {
+    lines.push("STATUS: NOT AVAILABLE");
+    lines.push(result.message);
+  } else {
+    lines.push(`STATUS: AVAILABLE - ${result.message}`);
+    lines.push("");
+    lines.push("--- ROOM OPTIONS ---");
+    lines.push("");
+    
+    result.roomOptions.forEach((room, i) => {
+      lines.push(`${i + 1}. ${room.name}`);
+      if (room.priceDisplay) {
+        lines.push(`   Price: ${room.priceDisplay}`);
+      }
+      if (room.sleeps) {
+        lines.push(`   Sleeps: ${room.sleeps}`);
+      }
+      if (room.bedType) {
+        lines.push(`   Bed: ${room.bedType}`);
+      }
+      if (room.cancellation) {
+        lines.push(`   Cancellation: ${room.cancellation}`);
+      }
+      if (room.breakfast) {
+        lines.push(`   Meals: ${room.breakfast}`);
+      }
+      if (room.features.length > 0) {
+        lines.push(`   Features: ${room.features.join(", ")}`);
+      }
+      lines.push("");
+    });
+    
+    if (result.lowestPrice) {
+      lines.push("--- SUMMARY ---");
+      lines.push(`Lowest price: ${result.lowestPriceDisplay}`);
+    }
+  }
+  
+  lines.push("");
+  lines.push("=".repeat(60));
+  lines.push(`Book at: ${result.url.split("?")[0]}`);
+  
+  return lines.join("\n");
+}
+
 // Create MCP server
 const server = new Server(
   {
     name: "hotelzero",
-    version: "1.4.0",
+    version: "1.5.0",
   },
   {
     capabilities: {
@@ -570,6 +636,21 @@ Results are scored and ranked by how well they match the criteria.`,
           required: ["urls"],
         },
       },
+      {
+        name: "check_availability",
+        description: "Check room availability and prices for a specific hotel on given dates. Returns available room types, prices, and booking details.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            hotelUrl: { type: "string", description: "Booking.com hotel URL to check" },
+            checkIn: { type: "string", description: "Check-in date (YYYY-MM-DD)" },
+            checkOut: { type: "string", description: "Check-out date (YYYY-MM-DD)" },
+            guests: { type: "number", description: "Number of guests (default: 2)", minimum: 1, maximum: 30 },
+            rooms: { type: "number", description: "Number of rooms (default: 1)", minimum: 1, maximum: 10 },
+          },
+          required: ["hotelUrl", "checkIn", "checkOut"],
+        },
+      },
     ],
   };
 });
@@ -721,6 +802,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
+      case "check_availability": {
+        const parsed = CheckAvailabilitySchema.parse(args);
+        const result = await b.checkAvailability({
+          hotelUrl: parsed.hotelUrl,
+          checkIn: parsed.checkIn,
+          checkOut: parsed.checkOut,
+          guests: parsed.guests,
+          rooms: parsed.rooms,
+        });
+        const formatted = formatAvailabilityResult(result);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: formatted,
+            },
+          ],
+        };
+      }
+
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
@@ -795,7 +897,7 @@ process.on("SIGTERM", async () => {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("HotelZero v1.4.0 running on stdio");
+  console.error("HotelZero v1.5.0 running on stdio");
 }
 
 main().catch((error) => {

@@ -22,11 +22,13 @@
 ## Completed (v1.4.0)
 - [x] Add `compare_hotels` tool - Compare 2-3 hotels side-by-side
 
+## Completed (v1.5.0)
+- [x] Add `check_availability` tool - Quick availability check for specific dates
+
 ## High Value Features
 - [ ] Pagination support (access more than ~25 results) - Partially done via `limit`
 
 ## New Tools
-- [ ] `check_availability` - Quick availability check
 - [ ] `get_reviews` - Fetch hotel reviews
 - [ ] `get_price_calendar` - Find cheapest dates
 
