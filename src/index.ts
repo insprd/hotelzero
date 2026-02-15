@@ -207,7 +207,7 @@ function formatHotelResult(hotel: HotelResult, index: number): string {
 const server = new Server(
   {
     name: "hotelzero",
-    version: "1.3.0",
+    version: "1.3.1",
   },
   {
     capabilities: {
@@ -607,7 +607,7 @@ process.on("SIGTERM", async () => {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("HotelZero v1.3.0 running on stdio");
+  console.error("HotelZero v1.3.1 running on stdio");
 }
 
 main().catch((error) => {
