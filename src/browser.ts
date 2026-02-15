@@ -51,6 +51,7 @@ export const ErrorCodes = {
   NETWORK_ERROR: "NETWORK_ERROR",
   TIMEOUT: "TIMEOUT",
   BLOCKED: "BLOCKED",
+  INVALID_PARAMS: "INVALID_PARAMS",
 } as const;
 
 // Retry configuration
@@ -360,6 +361,12 @@ export interface HotelDetails {
   locationInfo: string;
 }
 
+// Room amenity category (from GraphQL room facilities API)
+export interface RoomAmenityCategory {
+  category: string;
+  items: string[];
+}
+
 // Room option from availability check
 export interface RoomOption {
   name: string;
@@ -370,6 +377,8 @@ export interface RoomOption {
   bedType: string;
   cancellation: string;
   breakfast: string;
+  roomTypeId?: string;  // Room type ID for mapping facilities
+  amenities?: RoomAmenityCategory[];  // Room-specific amenities (AC, TV, bathroom, etc.)
 }
 
 // Availability check result
@@ -385,6 +394,37 @@ export interface AvailabilityResult {
   lowestPriceDisplay: string;
   message: string;
   url: string;
+}
+
+// Filters for searching specific hotel rates via API
+export interface HotelRateFilters {
+  breakfast?: boolean;        // Include breakfast (mealplan=1)
+  freeCancellation?: boolean; // Free cancellation only (fc=2)
+  bedType?: "king" | "queen" | "double" | "twin" | "single";
+}
+
+// Rate result from API-based hotel rate search
+export interface HotelRateResult {
+  hotelName: string;
+  hotelId: string;
+  hotelUrl: string;
+  checkIn: string;
+  checkOut: string;
+  guests: number;
+  rooms: number;
+  // Rate details from blocks array
+  roomName: string;
+  roomId: string;
+  price: number;
+  priceDisplay: string;
+  pricePerNight: number;
+  currency: string;
+  mealPlan: string;           // "Room only", "Breakfast included", etc.
+  cancellationPolicy: string; // "Free cancellation until X" or "Non-refundable"
+  freeCancellationUntil: string | null;
+  // Bed info from matchingUnitConfigurations
+  bedType: string;
+  bedCount: number;
 }
 
 // Individual review from guest
@@ -1148,8 +1188,15 @@ export class HotelBrowser {
         const targetResults = params.limit || 25;
         await this.scrollToLoadMore(targetResults);
 
-        // Extract detailed hotel info
-        let hotels = await this.extractHotelDetails();
+        // Try API-based extraction first (more reliable), fall back to DOM scraping
+        let hotels = await this.extractHotelsFromAPI();
+        
+        if (hotels.length === 0) {
+          logger.debug("API extraction returned no results, falling back to DOM scraping");
+          hotels = await this.extractHotelDetails();
+        } else {
+          logger.debug({ hotelCount: hotels.length }, "Hotels extracted from API cache");
+        }
         
         logger.debug({ hotelCount: hotels.length }, "Hotels extracted from page");
         
@@ -1179,6 +1226,359 @@ export class HotelBrowser {
           "Search attempt failed, retrying"
         );
       }
+    );
+  }
+
+  /**
+   * Search for a specific hotel's rate via the search API.
+   * This is 100% API-based (no HTML scraping) and returns detailed rate info
+   * including room type, meal plan, cancellation policy, and bed configuration.
+   * 
+   * The method searches for the hotel by name and extracts rate details from
+   * the Apollo cache's `blocks` array and `matchingUnitConfigurations`.
+   * 
+   * @param hotelUrl - The hotel's URL or name/slug (e.g., "la-sanguine" or full URL)
+   * @param checkIn - Check-in date (YYYY-MM-DD)
+   * @param checkOut - Check-out date (YYYY-MM-DD)
+   * @param guests - Number of guests
+   * @param rooms - Number of rooms
+   * @param filters - Optional rate filters (breakfast, free cancellation, bed type)
+   * @returns Rate details or null if hotel not found in results
+   */
+  async searchHotelRates(
+    hotelUrl: string,
+    checkIn: string,
+    checkOut: string,
+    guests: number = 2,
+    rooms: number = 1,
+    filters?: HotelRateFilters
+  ): Promise<HotelRateResult | null> {
+    if (!this.page) {
+      throw new HotelSearchError(
+        "Browser not initialized. Call init() first.",
+        ErrorCodes.BROWSER_NOT_INITIALIZED,
+        false
+      );
+    }
+
+    // Extract hotel name from URL for search query
+    const hotelName = this.extractHotelNameFromUrl(hotelUrl);
+    if (!hotelName) {
+      throw new HotelSearchError(
+        "Could not extract hotel name from URL",
+        ErrorCodes.INVALID_PARAMS,
+        false
+      );
+    }
+
+    logger.info(
+      { hotelName, checkIn, checkOut, guests, rooms, hasFilters: !!filters },
+      "Searching for hotel rate via API"
+    );
+
+    // Build search URL with hotel name as destination
+    const searchFilters: HotelFilters = {};
+    
+    // Apply rate-specific filters
+    if (filters?.breakfast) {
+      searchFilters.breakfast = true;
+    }
+    if (filters?.freeCancellation) {
+      searchFilters.freeCancellation = true;
+    }
+
+    const searchParams: HotelSearchParams = {
+      destination: hotelName.replace(/-/g, " "), // "la-sanguine" -> "la sanguine"
+      checkIn,
+      checkOut,
+      guests,
+      rooms,
+      limit: 10, // Small limit since we're looking for a specific hotel
+    };
+
+    const url = this.buildBookingUrl(searchParams, searchFilters);
+    logger.debug({ url }, "Hotel rate search URL");
+
+    return await retryWithBackoff(
+      async () => {
+        await this.enforceRateLimit();
+
+        try {
+          await this.page!.goto(url, {
+            waitUntil: "networkidle",
+            timeout: 30000,
+          });
+        } catch (error) {
+          const err = error as Error;
+          if (err.message.includes("timeout") || err.message.includes("Timeout")) {
+            throw new HotelSearchError(
+              "Page load timed out. The server may be slow or unavailable.",
+              ErrorCodes.TIMEOUT,
+              true
+            );
+          }
+          throw new HotelSearchError(
+            `Navigation failed: ${err.message}`,
+            ErrorCodes.NAVIGATION_FAILED,
+            true
+          );
+        }
+
+        await this.page!.waitForTimeout(2000);
+        await this.checkForBlocking();
+        await this.dismissPopups();
+
+        // Extract rate details from Apollo cache
+        const rateResult = await this.extractHotelRateFromAPI(hotelName, filters);
+
+        if (rateResult) {
+          // Populate search params in result
+          rateResult.checkIn = checkIn;
+          rateResult.checkOut = checkOut;
+          rateResult.guests = guests;
+          rateResult.rooms = rooms;
+          
+          logger.info(
+            { hotelName: rateResult.hotelName, price: rateResult.price, roomName: rateResult.roomName },
+            "Hotel rate found via API"
+          );
+          await this.saveSession();
+          return rateResult;
+        }
+
+        logger.warn({ hotelName }, "Hotel not found in search results");
+        return null;
+      },
+      DEFAULT_RETRY_CONFIG,
+      (attempt, error, delayMs) => {
+        logger.warn(
+          { attempt, error: error.message, retryInMs: delayMs },
+          "Hotel rate search failed, retrying"
+        );
+      }
+    );
+  }
+
+  /**
+   * Extract hotel name/slug from a Booking.com URL.
+   * Handles formats like:
+   * - https://www.booking.com/hotel/fr/la-sanguine.html
+   * - /hotel/fr/la-sanguine.html
+   * - la-sanguine
+   */
+  private extractHotelNameFromUrl(urlOrName: string): string | null {
+    // If it's just a name/slug (no slashes), return as-is
+    if (!urlOrName.includes("/")) {
+      return urlOrName.replace(/\.html$/, "");
+    }
+
+    // Extract from URL pattern: /hotel/{country}/{name}.html
+    const match = urlOrName.match(/\/hotel\/[a-z]{2}\/([^/.]+)/i);
+    if (match && match[1]) {
+      return match[1];
+    }
+
+    // Fallback: try to get the last path segment
+    const parts = urlOrName.split("/").filter(Boolean);
+    const lastPart = parts[parts.length - 1];
+    return lastPart?.replace(/\.html$/, "") || null;
+  }
+
+  /**
+   * Extract hotel rate details from Apollo cache.
+   * Finds the hotel matching the given name and extracts rate info from
+   * the `blocks` array and `matchingUnitConfigurations`.
+   */
+  private async extractHotelRateFromAPI(
+    hotelSlug: string,
+    filters?: HotelRateFilters
+  ): Promise<HotelRateResult | null> {
+    if (!this.page) return null;
+
+    // Bed type mapping for filter matching
+    const bedTypeMap: Record<string, number> = {
+      single: 1,
+      twin: 2,
+      double: 3,
+      queen: 5,
+      king: 6,
+    };
+    const targetBedType = filters?.bedType ? bedTypeMap[filters.bedType] : undefined;
+
+    return await this.page.evaluate(
+      ({ hotelSlug, targetBedType }) => {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const w = window as any;
+          const cache = w.__caplaDataStore?.apollo?.cache?.data?.data;
+          if (!cache) return null;
+
+          const rootQuery = cache["ROOT_QUERY"];
+          if (!rootQuery) return null;
+
+          const searchQueries = rootQuery.searchQueries;
+          if (!searchQueries) return null;
+
+          const searchKey = Object.keys(searchQueries).find((k) =>
+            k.startsWith("search(")
+          );
+          if (!searchKey) return null;
+
+          const searchOutput = searchQueries[searchKey];
+          const searchResults = searchOutput?.results;
+          if (!searchResults || !Array.isArray(searchResults)) return null;
+
+          // Find hotel matching the slug (check pageName)
+          const normalizedSlug = hotelSlug.toLowerCase().replace(/-/g, "");
+          
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const hotel = searchResults.find((h: any) => {
+            if (!h) return false;
+            const pageName = h.basicPropertyData?.pageName?.toLowerCase()?.replace(/-/g, "") || "";
+            const displayName = h.displayName?.text?.toLowerCase()?.replace(/\s+/g, "") || "";
+            return pageName.includes(normalizedSlug) || 
+                   normalizedSlug.includes(pageName) ||
+                   displayName.includes(normalizedSlug) ||
+                   normalizedSlug.includes(displayName);
+          });
+
+          if (!hotel) return null;
+
+          // Extract basic hotel info
+          const hotelName = hotel.displayName?.text || hotel.basicPropertyData?.pageName || "Unknown";
+          const pageName = hotel.basicPropertyData?.pageName || "";
+          const countryCode = hotel.basicPropertyData?.location?.countryCode || "";
+          const hotelId = hotel.basicPropertyData?.id?.toString() || "";
+          const hotelUrl = countryCode && pageName
+            ? `https://www.booking.com/hotel/${countryCode}/${pageName}.html`
+            : "";
+
+          // Get price info
+          const priceInfo = hotel.priceDisplayInfoIrene;
+          const displayPrice = priceInfo?.displayPrice?.amountPerStay;
+          const price = displayPrice?.amountUnformatted ?? 0;
+          const priceDisplay = displayPrice?.amountRounded || displayPrice?.amount || "$0";
+          const currency = displayPrice?.currency || "USD";
+          const pricePerNight = priceInfo?.averagePricePerNight?.amountUnformatted ?? 0;
+
+          // Get blocks array (rate options)
+          const blocks = hotel.blocks;
+          if (!blocks || !Array.isArray(blocks) || blocks.length === 0) {
+            // No blocks, return basic info without detailed rate
+            return {
+              hotelName,
+              hotelId,
+              hotelUrl,
+              checkIn: "",
+              checkOut: "",
+              guests: 0,
+              rooms: 0,
+              roomName: "Unknown",
+              roomId: "",
+              price,
+              priceDisplay,
+              pricePerNight,
+              currency,
+              mealPlan: "Unknown",
+              cancellationPolicy: "Unknown",
+              freeCancellationUntil: null,
+              bedType: "Unknown",
+              bedCount: 0,
+            };
+          }
+
+          // Get the first (cheapest/best match) block
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const block = blocks[0] as any;
+          const blockId = block.blockId || {};
+          const roomId = blockId.roomId?.toString() || "";
+          const mealPlanId = blockId.mealPlanId;
+          
+          // Meal plan mapping
+          const mealPlanNames: Record<number, string> = {
+            0: "Room only",
+            1: "Breakfast included",
+            2: "Half board",
+            3: "Full board",
+            4: "All-inclusive",
+          };
+          const mealPlan = mealPlanNames[mealPlanId] || "Room only";
+
+          // Cancellation policy
+          const freeCancellationUntil = block.freeCancellationUntil || null;
+          const cancellationPolicy = freeCancellationUntil
+            ? `Free cancellation until ${freeCancellationUntil}`
+            : "Non-refundable";
+
+          // Get room name and bed configuration from matchingUnitConfigurations
+          let roomName = "Standard Room";
+          let bedType = "Unknown";
+          let bedCount = 0;
+
+          const unitConfigs = hotel.matchingUnitConfigurations?.unitConfigurations;
+          if (unitConfigs && Array.isArray(unitConfigs)) {
+            // If filtering by bed type, try to find matching config
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            let matchingConfig = unitConfigs[0] as any;
+            
+            if (targetBedType !== undefined) {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const bedMatch = unitConfigs.find((config: any) => {
+                const beds = config.bedConfigurations?.[0]?.beds || [];
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                return beds.some((bed: any) => bed.type === targetBedType);
+              });
+              if (bedMatch) {
+                matchingConfig = bedMatch;
+              }
+            }
+
+            if (matchingConfig) {
+              roomName = matchingConfig.name || roomName;
+              const beds = matchingConfig.bedConfigurations?.[0]?.beds;
+              if (beds && beds.length > 0) {
+                const firstBed = beds[0];
+                bedCount = firstBed.count || 1;
+                // Reverse map bed type
+                const bedTypeNames: Record<number, string> = {
+                  1: "Single",
+                  2: "Twin",
+                  3: "Double",
+                  4: "Large Double",
+                  5: "Queen",
+                  6: "King",
+                  7: "Super King",
+                };
+                bedType = bedTypeNames[firstBed.type] || "Unknown";
+              }
+            }
+          }
+
+          return {
+            hotelName,
+            hotelId,
+            hotelUrl,
+            checkIn: "", // Will be filled by caller
+            checkOut: "",
+            guests: 0,
+            rooms: 0,
+            roomName,
+            roomId,
+            price,
+            priceDisplay,
+            pricePerNight,
+            currency,
+            mealPlan,
+            cancellationPolicy,
+            freeCancellationUntil,
+            bedType,
+            bedCount,
+          };
+        } catch {
+          return null;
+        }
+      },
+      { hotelSlug, targetBedType }
     );
   }
 
@@ -1389,6 +1789,880 @@ export class HotelBrowser {
       });
 
       return results;
+    });
+  }
+
+  /**
+   * Extract hotel data from Booking.com's Apollo GraphQL cache.
+   * This is more reliable than DOM scraping as it uses structured data.
+   * Falls back gracefully if the cache structure changes.
+   */
+  private async extractHotelsFromAPI(): Promise<HotelResult[]> {
+    if (!this.page) return [];
+
+    return await this.page.evaluate(() => {
+      try {
+        // Access the Apollo cache embedded in the page
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const w = window as any;
+        const cache = w.__caplaDataStore?.apollo?.cache?.data?.data;
+        if (!cache) return [];
+
+        const rootQuery = cache['ROOT_QUERY'];
+        if (!rootQuery) return [];
+
+        // searchQueries contains the search results
+        const searchQueries = rootQuery.searchQueries;
+        if (!searchQueries) return [];
+
+        // Find the search key (complex key with query parameters)
+        const searchKey = Object.keys(searchQueries).find(k => k.startsWith('search('));
+        if (!searchKey) return [];
+
+        const searchOutput = searchQueries[searchKey];
+        if (!searchOutput) return [];
+
+        // Get the results array
+        const searchResults = searchOutput.results;
+        if (!searchResults || !Array.isArray(searchResults)) return [];
+
+        const results: HotelResult[] = [];
+
+        for (const hotel of searchResults) {
+          if (!hotel) continue;
+
+          // Skip sponsored/native ad listings
+          const persuasion = hotel.persuasion;
+          if (persuasion?.showNativeAdLabel || persuasion?.nativeAdId) {
+            continue;
+          }
+
+          // Extract name
+          const name = hotel.displayName?.text || hotel.basicPropertyData?.pageName || 'Unknown';
+
+          // Extract price
+          let price: number | null = null;
+          let priceDisplay = 'Price not shown';
+          const priceInfo = hotel.priceDisplayInfoIrene?.displayPrice?.amountPerStay;
+          if (priceInfo) {
+            priceDisplay = priceInfo.amountRounded || priceInfo.amount || priceDisplay;
+            price = typeof priceInfo.amountUnformatted === 'number' ? priceInfo.amountUnformatted : null;
+          }
+
+          // Extract rating and reviews from basicPropertyData.reviews
+          let rating: number | null = null;
+          let ratingText = '';
+          let reviewCount: number | null = null;
+          const reviews = hotel.basicPropertyData?.reviews;
+          if (reviews) {
+            rating = typeof reviews.totalScore === 'number' ? reviews.totalScore : null;
+            ratingText = reviews.totalScoreTextTag?.translation || '';
+            reviewCount = typeof reviews.reviewsCount === 'number' ? reviews.reviewsCount : null;
+          }
+
+          // Extract location
+          const location = hotel.location?.displayLocation || '';
+          const distanceToCenter = hotel.location?.mainDistance || '';
+
+          // Build thumbnail URL
+          let thumbnailUrl: string | null = null;
+          const mainPhoto = hotel.basicPropertyData?.photos?.main;
+          if (mainPhoto) {
+            const relativeUrl = mainPhoto.highResJpegUrl?.relativeUrl ||
+                               mainPhoto.highResUrl?.relativeUrl ||
+                               mainPhoto.lowResJpegUrl?.relativeUrl;
+            if (relativeUrl) {
+              thumbnailUrl = `https://cf.bstatic.com${relativeUrl}`;
+            }
+          }
+
+          // Build link with country code (required for API data to load on detail page)
+          let link = '';
+          const pageName = hotel.basicPropertyData?.pageName;
+          const countryCode = hotel.basicPropertyData?.location?.countryCode;
+          if (pageName && countryCode) {
+            link = `https://www.booking.com/hotel/${countryCode}/${pageName}.html`;
+          } else if (pageName) {
+            // Fallback without country code (less reliable for API extraction)
+            link = `https://www.booking.com/hotel/${pageName}.html`;
+          }
+
+          // Extract amenities and highlights
+          const amenities: string[] = [];
+          const highlights: string[] = [];
+
+          // Sustainability
+          if (hotel.propertySustainability?.isSustainable) {
+            amenities.push('Sustainable');
+          }
+
+          // Policies
+          const policies = hotel.policies;
+          if (policies?.showFreeCancellation) {
+            highlights.push('Free Cancellation');
+          }
+          if (policies?.showNoPrepayment) {
+            highlights.push('No Prepayment');
+          }
+          if (policies?.showPetsAllowedForFree) {
+            amenities.push('Pet Friendly');
+          }
+
+          // Meal plan
+          if (hotel.mealPlanIncluded?.mealPlanType) {
+            amenities.push('Breakfast Included');
+          }
+
+          // Extract availability info
+          let availability: string | null = null;
+          const soldOutInfo = hotel.soldOutInfo;
+          if (soldOutInfo?.messages && soldOutInfo.messages.length > 0) {
+            const msg = soldOutInfo.messages[0];
+            if (msg?.text) {
+              availability = msg.text;
+            }
+          }
+
+          results.push({
+            name,
+            price,
+            priceDisplay,
+            rating,
+            ratingText,
+            reviewCount,
+            location,
+            distanceToCenter,
+            amenities,
+            highlights,
+            link,
+            thumbnailUrl,
+            availability,
+          });
+        }
+
+        return results;
+      } catch {
+        // If anything goes wrong with API extraction, return empty to trigger fallback
+        return [];
+      }
+    });
+  }
+
+  /**
+   * Extract hotel details from Booking.com's Apollo GraphQL cache on a hotel detail page.
+   * This is more reliable than DOM scraping as it uses structured data.
+   * Returns null if extraction fails (triggering DOM fallback).
+   */
+  private async extractHotelDetailsFromAPI(): Promise<Omit<HotelDetails, 'url'> | null> {
+    if (!this.page) return null;
+
+    return await this.page.evaluate(() => {
+      try {
+        // Access the Apollo cache embedded in the page
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const w = window as any;
+        const cache = w.__caplaDataStore?.apollo?.cache?.data?.data;
+        if (!cache) return null;
+
+        // Helper to resolve __ref pointers
+        const resolveRef = (ref: unknown): unknown => {
+          if (ref && typeof ref === 'object' && '__ref' in ref) {
+            return cache[(ref as { __ref: string }).__ref];
+          }
+          return ref;
+        };
+
+        // Find the Property entry - it has a key like 'Property:{"id":6523595}'
+        const propertyKey = Object.keys(cache).find(k => k.startsWith('Property:{"id":'));
+        if (!propertyKey) return null;
+
+        const property = cache[propertyKey];
+        if (!property) return null;
+
+        // Extract hotel ID from the property key
+        const idMatch = propertyKey.match(/Property:\{"id":(\d+)\}/);
+        const hotelId = idMatch ? idMatch[1] : null;
+
+        // Get BasicPropertyData for address and location
+        const basicDataKey = hotelId ? `BasicPropertyData:${hotelId}` : null;
+        const basicData = basicDataKey ? cache[basicDataKey] : null;
+
+        // Extract name
+        const name = property.name || basicData?.name || 'Unknown';
+
+        // Extract rating and reviews from property.reviews
+        let rating: number | null = null;
+        let ratingText = '';
+        let reviewCount: number | null = null;
+
+        const reviews = property.reviews;
+        if (reviews) {
+          reviewCount = typeof reviews.reviewsCount === 'number' ? reviews.reviewsCount : null;
+          
+          // Find the total score from questions array
+          const questions = reviews.questions;
+          if (Array.isArray(questions)) {
+            const totalQ = questions.find((q: { name?: string }) => q?.name === 'total');
+            if (totalQ && typeof totalQ.score === 'number') {
+              const score = totalQ.score;
+              rating = score;
+              // Generate rating text based on score
+              if (score >= 9) ratingText = 'Superb';
+              else if (score >= 8) ratingText = 'Very Good';
+              else if (score >= 7) ratingText = 'Good';
+              else if (score >= 6) ratingText = 'Pleasant';
+              else ratingText = 'Review score';
+            }
+          }
+        }
+
+        // Extract address from BasicPropertyData
+        const address = basicData?.location?.formattedAddress || 
+                       basicData?.location?.formattedAddressShort || '';
+
+        // Extract star rating from accommodation type
+        let starRating: number | null = null;
+        const accomType = resolveRef(property.accommodationType);
+        if (accomType && typeof accomType === 'object' && 'starRating' in accomType) {
+          starRating = (accomType as { starRating?: number }).starRating || null;
+        }
+
+        // Extract check-in/out times from houseRules
+        let checkInTime = '';
+        let checkOutTime = '';
+        const houseRules = property.houseRules;
+        if (houseRules?.checkinCheckoutTimes) {
+          const times = houseRules.checkinCheckoutTimes;
+          if (times.checkinTimeRange) {
+            const from = times.checkinTimeRange.fromFormatted;
+            const until = times.checkinTimeRange.untilFormatted;
+            if (from && until) {
+              checkInTime = `${from} - ${until}`;
+            } else if (from) {
+              checkInTime = `From ${from}`;
+            } else if (until) {
+              checkInTime = `Until ${until}`;
+            }
+          }
+          if (times.checkoutTimeRange) {
+            const from = times.checkoutTimeRange.fromFormatted;
+            const until = times.checkoutTimeRange.untilFormatted;
+            if (from && until) {
+              checkOutTime = `${from} - ${until}`;
+            } else if (until) {
+              checkOutTime = `Until ${until}`;
+            } else if (from) {
+              checkOutTime = `From ${from}`;
+            }
+          }
+        }
+
+        // Extract popular facilities from accommodationHighlights
+        const popularFacilities: string[] = [];
+        const highlightKeys = Object.keys(property).filter(k => k.startsWith('accommodationHighlights('));
+        for (const key of highlightKeys) {
+          const highlights = property[key];
+          if (Array.isArray(highlights)) {
+            for (const item of highlights) {
+              const entities = item?.entities;
+              if (Array.isArray(entities)) {
+                for (const entity of entities) {
+                  // Direct title (like BreakfastHighlight)
+                  if (entity?.title) {
+                    popularFacilities.push(entity.title);
+                  }
+                  // Resolve __ref for GenericFacilityHighlight, WifiFacilityHighlight, etc.
+                  const resolved = resolveRef(entity);
+                  if (resolved && typeof resolved === 'object' && 'title' in resolved) {
+                    const title = (resolved as { title?: string }).title;
+                    if (title && !popularFacilities.includes(title)) {
+                      popularFacilities.push(title);
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        // Extract all facilities from highlights (popularity based)
+        const allFacilities: string[] = [];
+        const facilityKeys = Object.keys(property).filter(k => k.startsWith('highlights('));
+        for (const key of facilityKeys) {
+          const highlightData = property[key];
+          const entities = highlightData?.entities;
+          if (Array.isArray(entities)) {
+            for (const entity of entities) {
+              // Skip Meal type entries
+              if (entity?.__typename === 'Meal') continue;
+              
+              const resolved = resolveRef(entity);
+              if (resolved && typeof resolved === 'object') {
+                // For BaseFacility, look at instances
+                const instances = (resolved as { instances?: unknown[] }).instances;
+                if (Array.isArray(instances)) {
+                  for (const inst of instances) {
+                    const resolvedInst = resolveRef(inst);
+                    if (resolvedInst && typeof resolvedInst === 'object' && 'title' in resolvedInst) {
+                      const title = (resolvedInst as { title?: string }).title;
+                      if (title && !allFacilities.includes(title)) {
+                        allFacilities.push(title);
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        // Extract photos from propertyGallery
+        const photos: string[] = [];
+        const galleryKeys = Object.keys(property).filter(k => k.startsWith('propertyGallery('));
+        for (const key of galleryKeys) {
+          const gallery = property[key];
+          
+          // Main photo
+          if (gallery?.mainPhoto) {
+            const mainPhoto = resolveRef(gallery.mainPhoto);
+            if (mainPhoto && typeof mainPhoto === 'object') {
+              // Look for resource with max500 or max1024x768
+              const photoObj = mainPhoto as Record<string, unknown>;
+              const resourceKey = Object.keys(photoObj).find(k => k.includes('max500') || k.includes('max1024'));
+              if (resourceKey) {
+                const resource = photoObj[resourceKey] as { absoluteUrl?: string };
+                if (resource?.absoluteUrl) {
+                  photos.push(resource.absoluteUrl);
+                }
+              }
+            }
+          }
+
+          // Room photos
+          const roomPhotos = gallery?.roomPhotos;
+          if (Array.isArray(roomPhotos)) {
+            for (const room of roomPhotos) {
+              const roomPhotosList = room?.photos;
+              if (Array.isArray(roomPhotosList) && photos.length < 5) {
+                for (const photoRef of roomPhotosList) {
+                  if (photos.length >= 5) break;
+                  const photo = resolveRef(photoRef);
+                  if (photo && typeof photo === 'object') {
+                    const photoObj = photo as Record<string, unknown>;
+                    const resourceKey = Object.keys(photoObj).find(k => k.includes('max500') || k.includes('max1024'));
+                    if (resourceKey) {
+                      const resource = photoObj[resourceKey] as { absoluteUrl?: string };
+                      if (resource?.absoluteUrl && !photos.includes(resource.absoluteUrl)) {
+                        photos.push(resource.absoluteUrl);
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        // Extract room types from property.rooms
+        const roomTypes: string[] = [];
+        const rooms = property.rooms;
+        if (Array.isArray(rooms)) {
+          for (const roomRef of rooms) {
+            const room = resolveRef(roomRef);
+            if (room && typeof room === 'object') {
+              const roomObj = room as { name?: string; description?: string };
+              const roomName = roomObj.name || roomObj.description;
+              if (roomName && !roomTypes.includes(roomName)) {
+                roomTypes.push(roomName);
+              }
+            }
+          }
+        }
+
+        // Extract location info
+        let locationInfo = '';
+        if (basicData?.location) {
+          const loc = basicData.location;
+          const parts: string[] = [];
+          if (loc.city) parts.push(loc.city);
+          if (loc.countryCode) parts.push(loc.countryCode.toUpperCase());
+          locationInfo = parts.join(', ');
+          if (loc.latitude && loc.longitude) {
+            locationInfo += ` (${loc.latitude.toFixed(4)}, ${loc.longitude.toFixed(4)})`;
+          }
+        }
+
+        // Extract review category scores for highlights
+        const guestReviewHighlights: string[] = [];
+        if (reviews?.questions && Array.isArray(reviews.questions)) {
+          const categoryNames: Record<string, string> = {
+            'hotel_staff': 'Staff',
+            'hotel_location': 'Location', 
+            'hotel_clean': 'Cleanliness',
+            'hotel_comfort': 'Comfort',
+            'hotel_value': 'Value for money',
+            'hotel_services': 'Facilities',
+            'hotel_free_wifi': 'Free WiFi'
+          };
+          
+          for (const q of reviews.questions) {
+            if (q?.name && q.name !== 'total' && typeof q.score === 'number') {
+              const displayName = categoryNames[q.name] || q.name;
+              if (categoryNames[q.name]) {
+                guestReviewHighlights.push(`${displayName}: ${q.score.toFixed(1)}`);
+              }
+            }
+          }
+        }
+
+        // Validate we have meaningful data before returning
+        // Name should be a proper hotel name (at least 3 chars, not 'Unknown')
+        if (!name || name === 'Unknown' || name.length < 3) {
+          return null; // Trigger DOM fallback
+        }
+
+        // Note: Description, pricePerNight, totalPrice, nearbyAttractions may need DOM fallback
+        // as they're not consistently in the Apollo cache or are dynamic
+        return {
+          name,
+          rating,
+          ratingText,
+          reviewCount,
+          starRating,
+          address,
+          description: '', // Not typically in cache, will need DOM fallback if needed
+          highlights: popularFacilities.slice(0, 5).join(', '),
+          pricePerNight: null, // Dynamic, not in cache
+          priceDisplay: '',
+          totalPrice: '',
+          checkInTime,
+          checkOutTime,
+          popularFacilities: popularFacilities.slice(0, 15),
+          allFacilities: allFacilities.slice(0, 30),
+          roomTypes: roomTypes.slice(0, 5),
+          photos: photos.slice(0, 5),
+          nearbyAttractions: [], // Would need propertySurroundings query
+          guestReviewHighlights: guestReviewHighlights.slice(0, 7),
+          locationInfo
+        };
+      } catch {
+        // If anything goes wrong with API extraction, return null to trigger fallback
+        return null;
+      }
+    });
+  }
+
+  /**
+   * Fetch room facilities via Booking.com's GraphQL API.
+   * This provides detailed amenities for each room type (AC, TV, bathroom details, etc.)
+   * Must be called when already on a hotel page with an active session.
+   * 
+   * @param hotelId - The numeric hotel ID (e.g., 6523595)
+   * @param checkIn - Check-in date in YYYY-MM-DD format
+   * @param checkOut - Check-out date in YYYY-MM-DD format
+   * @returns Map of roomId to array of amenity categories
+   */
+  private async fetchRoomFacilitiesGraphQL(
+    hotelId: string,
+    checkIn: string,
+    checkOut: string
+  ): Promise<Map<string, RoomAmenityCategory[]>> {
+    if (!this.page) return new Map();
+    
+    try {
+      const result = await this.page.evaluate(
+        async ({ hotelId, checkIn, checkOut }) => {
+          const query = `
+            query RoomPageDesktopRDS($rdsInput: RDSRoomDetailQueryInput!) {
+              roomDetail(roomDetailQueryInput: $rdsInput) {
+                categorizedFacilitiesForAllRooms {
+                  roomId
+                  categorizedFacilities {
+                    category
+                    facilities {
+                      name
+                      id
+                    }
+                  }
+                }
+              }
+            }
+          `;
+
+          const variables = {
+            rdsInput: {
+              hotelId: String(hotelId),
+              searchConfig: {
+                searchConfigDate: {
+                  checkin: checkIn,
+                  checkout: checkOut,
+                },
+                nbRooms: 1,
+                nbAdults: 2,
+                nbChildren: 0,
+                childrenAges: [],
+              },
+              highlightedBlocks: [],
+              selectedFilters: '',
+              travelReason: 'LEISURE',
+            },
+          };
+
+          try {
+            const response = await fetch('/dml/graphql', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-booking-topic': 'capla_browser_b-property-web-property-page',
+                'x-booking-context-action-name': 'hotel',
+                'apollographql-client-name': 'b-property-web-property-page_rust',
+              },
+              body: JSON.stringify({
+                operationName: 'RoomPageDesktopRDS',
+                variables,
+                query,
+              }),
+            });
+
+            if (!response.ok) {
+              return { error: `HTTP ${response.status}` };
+            }
+
+            const data = await response.json();
+            return data;
+          } catch (e: unknown) {
+            return { error: e instanceof Error ? e.message : 'Unknown error' };
+          }
+        },
+        { hotelId, checkIn, checkOut }
+      );
+
+      if ('error' in result) {
+        logger.debug({ error: result.error }, 'GraphQL room facilities fetch failed');
+        return new Map();
+      }
+
+      // Parse the response into our map structure
+      const facilitiesMap = new Map<string, RoomAmenityCategory[]>();
+      const roomData = result?.data?.roomDetail?.categorizedFacilitiesForAllRooms || [];
+
+      for (const room of roomData) {
+        const roomId = String(room.roomId);
+        const categories: RoomAmenityCategory[] = [];
+
+        for (const cat of room.categorizedFacilities || []) {
+          categories.push({
+            category: cat.category || 'General',
+            items: (cat.facilities || []).map((f: { name?: string }) => f.name || '').filter(Boolean),
+          });
+        }
+
+        if (categories.length > 0) {
+          facilitiesMap.set(roomId, categories);
+        }
+      }
+
+      logger.debug({ roomCount: facilitiesMap.size }, 'Fetched room facilities via GraphQL');
+      return facilitiesMap;
+    } catch (error) {
+      logger.debug({ error }, 'Failed to fetch room facilities via GraphQL');
+      return new Map();
+    }
+  }
+
+  /**
+   * Extract hotel ID from the current page URL or DOM.
+   * Booking.com hotel IDs are typically in the URL path or data attributes.
+   */
+  private async extractHotelId(): Promise<string | null> {
+    if (!this.page) return null;
+
+    return await this.page.evaluate(() => {
+      // Try to get from URL path (e.g., /hotel/fr/hotel-name.html?... contains ID in data)
+      // Actually, the ID is often in data attributes or Apollo cache
+      
+      // Method 1: Look for data-hotel-id attribute
+      const hotelIdEl = document.querySelector('[data-hotel-id]');
+      if (hotelIdEl) {
+        return hotelIdEl.getAttribute('data-hotel-id');
+      }
+
+      // Method 2: Look in Apollo cache
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const w = window as any;
+      const cache = w.__caplaDataStore?.apollo?.cache?.data?.data;
+      if (cache) {
+        const propertyKey = Object.keys(cache).find(k => k.startsWith('Property:{"id":'));
+        if (propertyKey) {
+          const match = propertyKey.match(/Property:\{"id":(\d+)\}/);
+          if (match && match[1]) return match[1];
+        }
+      }
+
+      // Method 3: Look for form inputs with hotel_id
+      const hotelInput = document.querySelector<HTMLInputElement>('input[name="hotel_id"]');
+      if (hotelInput?.value) return hotelInput.value;
+
+      // Method 4: Look in data-block-id attributes (format: roomTypeId_policyId_hotelId_...)
+      const blockEl = document.querySelector('[data-block-id]');
+      if (blockEl) {
+        const blockId = blockEl.getAttribute('data-block-id') || '';
+        const parts = blockId.split('_');
+        // Hotel ID is typically in position 2 (after roomTypeId and policyId)
+        const potentialHotelId = parts[2];
+        if (parts.length >= 3 && potentialHotelId && /^\d{5,}$/.test(potentialHotelId)) {
+          return potentialHotelId;
+        }
+      }
+
+      return null;
+    });
+  }
+
+  /**
+   * Extract reviews data from Booking.com's Apollo GraphQL cache.
+   * Returns null if extraction fails (triggering DOM fallback).
+   */
+  private async extractReviewsFromAPI(): Promise<{
+    hotelName: string;
+    overallRating: number | null;
+    totalReviews: number;
+    ratingBreakdown: RatingBreakdown;
+    reviews: Review[];
+  } | null> {
+    if (!this.page) return null;
+
+    return await this.page.evaluate(() => {
+      try {
+        // Access the Apollo cache embedded in the page
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const w = window as any;
+        const cache = w.__caplaDataStore?.apollo?.cache?.data?.data;
+        if (!cache) return null;
+
+        // Helper to resolve __ref pointers
+        const resolveRef = (ref: unknown): unknown => {
+          if (ref && typeof ref === 'object' && '__ref' in ref) {
+            return cache[(ref as { __ref: string }).__ref];
+          }
+          return ref;
+        };
+
+        // Find the Property entry - it has a key like 'Property:{"id":6523595}'
+        const propertyKey = Object.keys(cache).find(k => k.startsWith('Property:{"id":'));
+        if (!propertyKey) return null;
+
+        const property = cache[propertyKey];
+        if (!property) return null;
+
+        // Extract hotel ID from the property key
+        const idMatch = propertyKey.match(/Property:\{"id":(\d+)\}/);
+        const hotelId = idMatch ? idMatch[1] : null;
+
+        // Get BasicPropertyData for hotel name
+        const basicDataKey = hotelId ? `BasicPropertyData:${hotelId}` : null;
+        const basicData = basicDataKey ? cache[basicDataKey] : null;
+
+        // Extract hotel name
+        const hotelName = property.name || basicData?.name || '';
+
+        // Extract overall rating, total reviews, and rating breakdown from property.reviews
+        let overallRating: number | null = null;
+        let totalReviews = 0;
+        const ratingBreakdown: {
+          staff: number | null;
+          facilities: number | null;
+          cleanliness: number | null;
+          comfort: number | null;
+          valueForMoney: number | null;
+          location: number | null;
+          freeWifi: number | null;
+        } = {
+          staff: null,
+          facilities: null,
+          cleanliness: null,
+          comfort: null,
+          valueForMoney: null,
+          location: null,
+          freeWifi: null,
+        };
+
+        const reviewsData = property.reviews;
+        if (reviewsData) {
+          totalReviews = typeof reviewsData.reviewsCount === 'number' ? reviewsData.reviewsCount : 0;
+
+          // Map question names to breakdown fields
+          const questionMap: Record<string, keyof typeof ratingBreakdown> = {
+            'hotel_staff': 'staff',
+            'hotel_services': 'facilities',
+            'hotel_clean': 'cleanliness',
+            'hotel_comfort': 'comfort',
+            'hotel_value': 'valueForMoney',
+            'hotel_location': 'location',
+            'hotel_free_wifi': 'freeWifi',
+          };
+
+          const questions = reviewsData.questions;
+          if (Array.isArray(questions)) {
+            for (const q of questions) {
+              if (!q?.name || typeof q.score !== 'number') continue;
+              
+              if (q.name === 'total') {
+                overallRating = q.score;
+              } else {
+                const breakdownKey = questionMap[q.name];
+                if (breakdownKey) {
+                  ratingBreakdown[breakdownKey] = q.score;
+                }
+              }
+            }
+          }
+        }
+
+        // Extract individual reviews from FeaturedReview entries
+        const reviews: Array<{
+          title: string;
+          rating: number | null;
+          date: string;
+          travelerType: string;
+          stayDate: string;
+          roomType: string;
+          nightsStayed: string;
+          positive: string;
+          negative: string;
+          country: string;
+        }> = [];
+
+        // Map customer types to display names
+        const customerTypeMap: Record<string, string> = {
+          'SOLO_TRAVELLER': 'Solo traveler',
+          'YOUNG_COUPLE': 'Couple',
+          'MATURE_COUPLE': 'Couple',
+          'FAMILY_WITH_YOUNG_CHILDREN': 'Family with young children',
+          'FAMILY_WITH_OLDER_CHILDREN': 'Family with older children',
+          'WITH_FRIENDS': 'Group of friends',
+          'BUSINESS': 'Business traveler',
+        };
+
+        // Map country codes to names
+        const countryCodeMap: Record<string, string> = {
+          'us': 'United States',
+          'gb': 'United Kingdom',
+          'fr': 'France',
+          'de': 'Germany',
+          'es': 'Spain',
+          'it': 'Italy',
+          'nl': 'Netherlands',
+          'be': 'Belgium',
+          'ch': 'Switzerland',
+          'au': 'Australia',
+          'ca': 'Canada',
+          'jp': 'Japan',
+          'cn': 'China',
+          'kr': 'South Korea',
+          'br': 'Brazil',
+          'mx': 'Mexico',
+          'in': 'India',
+          'ru': 'Russia',
+          'pl': 'Poland',
+          'se': 'Sweden',
+          'no': 'Norway',
+          'dk': 'Denmark',
+          'fi': 'Finland',
+          'at': 'Austria',
+          'pt': 'Portugal',
+          'gr': 'Greece',
+          'tr': 'Turkey',
+          'ie': 'Ireland',
+          'nz': 'New Zealand',
+          'za': 'South Africa',
+          'ar': 'Argentina',
+          'cl': 'Chile',
+          'co': 'Colombia',
+          'th': 'Thailand',
+          'sg': 'Singapore',
+          'my': 'Malaysia',
+          'id': 'Indonesia',
+          'ph': 'Philippines',
+          'vn': 'Vietnam',
+          'ae': 'United Arab Emirates',
+          'sa': 'Saudi Arabia',
+          'eg': 'Egypt',
+          'il': 'Israel',
+          'cz': 'Czech Republic',
+          'hu': 'Hungary',
+          'ro': 'Romania',
+        };
+
+        // Find all FeaturedReview entries
+        const reviewKeys = Object.keys(cache).filter(k => k.startsWith('FeaturedReview:'));
+        
+        for (const key of reviewKeys) {
+          const review = cache[key];
+          if (!review) continue;
+
+          // Format the date from Unix timestamp
+          let dateStr = '';
+          if (typeof review.completed === 'number') {
+            const date = new Date(review.completed * 1000);
+            dateStr = date.toLocaleDateString('en-US', { 
+              year: 'numeric', 
+              month: 'long', 
+              day: 'numeric' 
+            });
+          }
+
+          // Get room type from ref
+          let roomType = '';
+          const roomRef = resolveRef(review.roomType);
+          if (roomRef && typeof roomRef === 'object' && 'name' in roomRef) {
+            roomType = (roomRef as { name?: string }).name || '';
+          }
+
+          // Get country name from code
+          const countryCode = (review.guestCountryCode || '').toLowerCase();
+          const country = countryCodeMap[countryCode] || countryCode.toUpperCase();
+
+          // Get traveler type display name
+          const travelerType = customerTypeMap[review.customerType] || review.customerType || '';
+
+          reviews.push({
+            title: review.title || '',
+            rating: typeof review.averageScore === 'number' ? review.averageScore : null,
+            date: dateStr,
+            travelerType,
+            stayDate: '', // Not available in FeaturedReview
+            roomType,
+            nightsStayed: '', // Not available in FeaturedReview
+            positive: review.positiveText || '',
+            negative: review.negativeText || '',
+            country,
+          });
+        }
+
+        // Sort reviews by date (newest first - higher timestamp = newer)
+        reviews.sort((a, b) => {
+          // Parse dates back for comparison
+          const dateA = new Date(a.date).getTime() || 0;
+          const dateB = new Date(b.date).getTime() || 0;
+          return dateB - dateA;
+        });
+
+        // Validate we have meaningful data
+        if (!hotelName || hotelName.length < 3) {
+          return null;
+        }
+
+        return {
+          hotelName,
+          overallRating,
+          totalReviews,
+          ratingBreakdown,
+          reviews,
+        };
+      } catch {
+        return null;
+      }
     });
   }
 
@@ -1659,6 +2933,18 @@ export class HotelBrowser {
         await this.page!.waitForTimeout(2000);
         await this.checkForBlocking();
         await this.dismissPopups();
+
+        // Try API extraction first (more reliable structured data)
+        const apiDetails = await this.extractHotelDetailsFromAPI();
+        if (apiDetails) {
+          logger.debug("Successfully extracted hotel details from API cache");
+          return {
+            ...apiDetails,
+            url: hotelUrl,
+          };
+        }
+
+        logger.debug("API extraction returned no results, falling back to DOM scraping");
 
         // Extract comprehensive hotel details using evaluate with string to avoid __name compilation issues
         const details = await this.page!.evaluate(`
@@ -1992,7 +3278,7 @@ export class HotelBrowser {
         await this.checkForBlocking();
         await this.dismissPopups();
 
-        // Extract room availability using string-based evaluate
+        // Extract room availability using data attributes (primary) with DOM fallback
         const result = await this.page!.evaluate(`
           (function() {
             function getText(selector) {
@@ -2004,152 +3290,292 @@ export class HotelBrowser {
             var hotelName = getText('h2') || getText('h1').split('(')[0].trim() || "Unknown Hotel";
 
             var roomOptions = [];
-            var seenRooms = {};
             
-            // Strategy 1: Look for room type links (most reliable on Booking.com)
-            var roomTypeLinks = document.querySelectorAll('.hprt-roomtype-link, a[class*="hprt-roomtype"]');
+            // ============================================================
+            // STRATEGY 1: Extract from data-* attributes (most reliable)
+            // Uses data-block-id, data-hotel-rounded-price, and data-fltrs
+            // ============================================================
             
-            for (var i = 0; i < roomTypeLinks.length && roomOptions.length < 10; i++) {
-              var roomLink = roomTypeLinks[i];
-              var name = roomLink.textContent.trim();
-              
-              if (!name || name.length < 3 || seenRooms[name]) continue;
-              seenRooms[name] = true;
-              
-              // Find the containing row to get price and details
-              var row = roomLink.closest('tr') || roomLink.closest('[data-block-id]') || roomLink.parentElement;
-              var rowText = row ? row.textContent || "" : "";
-              
-              // Try to find price in the same row or nearby
-              var price = null;
-              var priceDisplay = "";
-              
-              // Look for price cell in this row or next siblings
-              var priceCell = row ? row.querySelector('.hprt-table-cell-price, [class*="price-block"], [class*="bui-price"]') : null;
-              if (priceCell) {
-                priceDisplay = priceCell.textContent.trim();
-                var match = priceDisplay.match(/[\\$€£¥]\\s*([\\d,]+)/);
-                if (match) {
-                  price = parseInt(match[1].replace(/,/g, ""));
-                  // Clean up price display
-                  var perNightMatch = priceDisplay.match(/[\\$€£¥]\\s*[\\d,]+/);
-                  priceDisplay = perNightMatch ? perNightMatch[0] : priceDisplay.split('\\n')[0];
+            // First, build maps of room type IDs to room names and bed types from header rows
+            var roomNameMap = {};
+            var bedTypeMap = {};
+            var roomTypeHeaders = document.querySelectorAll('.hprt-roomtype-link');
+            for (var h = 0; h < roomTypeHeaders.length; h++) {
+              var header = roomTypeHeaders[h];
+              var headerRow = header.closest('tr');
+              var headerBlockId = headerRow ? headerRow.getAttribute('data-block-id') : null;
+              if (headerBlockId && headerBlockId.indexOf('_') > 0) {
+                var headerRoomTypeId = headerBlockId.split('_')[0];
+                var headerRoomName = header.textContent ? header.textContent.trim() : '';
+                if (headerRoomName) {
+                  roomNameMap[headerRoomTypeId] = headerRoomName;
                 }
-              }
-              
-              // If no price found in row, search in sibling rows with same room type
-              if (!price) {
-                var allPriceCells = document.querySelectorAll('.hprt-table-cell-price');
-                for (var j = 0; j < allPriceCells.length && !price; j++) {
-                  var cellText = allPriceCells[j].textContent || "";
-                  var match = cellText.match(/[\\$€£¥]\\s*([\\d,]+)/);
-                  if (match) {
-                    price = parseInt(match[1].replace(/,/g, ""));
-                    priceDisplay = match[0];
-                    break;
+                // Also capture bed type from header row
+                var bedEl = headerRow.querySelector('.hprt-roomtype-bed, [class*="bed-type"]');
+                if (bedEl) {
+                  var bedText = bedEl.textContent || '';
+                  var bedLines = bedText.split('\\n').map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
+                  for (var b = 0; b < bedLines.length; b++) {
+                    if (bedLines[b].match(/(bed|queen|king|twin|double|single|sofa)/i)) {
+                      bedTypeMap[headerRoomTypeId] = bedLines[b];
+                      break;
+                    }
                   }
                 }
               }
+            }
+            
+            // Extract all room blocks with data-hotel-rounded-price attribute
+            // Returns ALL rate options (room + meal plan + cancellation combinations)
+            var dataRows = document.querySelectorAll('tr[data-block-id][data-hotel-rounded-price]');
+            var seenBlockIds = {}; // Track exact block IDs to avoid true duplicates
+            
+            for (var i = 0; i < dataRows.length && roomOptions.length < 30; i++) {
+              var row = dataRows[i];
+              var blockId = row.getAttribute('data-block-id') || '';
+              var parts = blockId.split('_');
+              if (parts.length < 2) continue;
               
-              // Bed type - clean up multiline text
-              var bedType = "";
-              var bedEl = row ? row.querySelector('.hprt-roomtype-bed, [class*="bed-type"]') : null;
+              // Skip exact duplicate block IDs
+              if (seenBlockIds[blockId]) continue;
+              seenBlockIds[blockId] = true;
+              
+              var roomTypeId = parts[0];
+              
+              // Get price from data attribute (more reliable than DOM text)
+              var roundedPrice = row.getAttribute('data-hotel-rounded-price');
+              var price = roundedPrice ? parseInt(roundedPrice, 10) : null;
+              
+              // Get price display from DOM
+              var priceDisplay = '';
+              var priceEl = row.querySelector('.bui-price-display__value');
+              if (priceEl) {
+                var displayMatch = (priceEl.textContent || '').match(/[\\$€£¥][\\d,]+/);
+                priceDisplay = displayMatch ? displayMatch[0] : '';
+              }
+              
+              // Get room name from our map
+              var roomName = roomNameMap[roomTypeId] || '';
+              
+              // If no name in map, try to find it in the row
+              if (!roomName) {
+                var roomLink = row.querySelector('.hprt-roomtype-link, a[class*="room"]');
+                roomName = roomLink ? (roomLink.textContent || '').trim() : '';
+              }
+              
+              // Still no name? Use a generic one
+              if (!roomName) {
+                roomName = 'Room Type ' + roomTypeId;
+              }
+              
+              // Parse data-fltrs for structured info (breakfast, beds)
+              var fltrs = row.getAttribute('data-fltrs');
+              var breakfastIncluded = false;
+              var bedCount = [];
+              
+              if (fltrs) {
+                try {
+                  var fltrData = JSON.parse(fltrs.replace(/\\n/g, ''));
+                  breakfastIncluded = fltrData.breakfast_included === 1;
+                  bedCount = fltrData.bed_count || [];
+                } catch (e) {}
+              }
+              
+              // Get bed type from DOM (for display)
+              var bedType = '';
+              var bedEl = row.querySelector('.hprt-roomtype-bed, [class*="bed-type"]');
               if (bedEl) {
-                // Get first meaningful line
-                var bedText = bedEl.textContent || "";
+                var bedText = bedEl.textContent || '';
                 var bedLines = bedText.split('\\n').map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
-                // Find line with bed info
                 for (var k = 0; k < bedLines.length; k++) {
                   if (bedLines[k].match(/(bed|queen|king|twin|double|single|sofa)/i)) {
                     bedType = bedLines[k];
                     break;
                   }
                 }
-                if (!bedType && bedLines.length > 0) {
-                  bedType = bedLines[0];
-                }
+              }
+              // Fallback 1: use bed type from our map (captured from header rows)
+              if (!bedType && bedTypeMap[roomTypeId]) {
+                bedType = bedTypeMap[roomTypeId];
+              }
+              // Fallback 2: use bed count from data-fltrs
+              if (!bedType && bedCount.length > 0) {
+                bedType = bedCount.length === 1 ? bedCount[0] + ' bed' : bedCount.join(' or ') + ' beds';
               }
               
-              // Cancellation
-              var cancellation = "";
-              if (rowText.toLowerCase().indexOf("free cancellation") >= 0) {
-                cancellation = "Free cancellation";
-              } else if (rowText.toLowerCase().indexOf("non-refundable") >= 0) {
-                cancellation = "Non-refundable";
+              // Get cancellation policy from row text
+              var rowText = row.textContent || '';
+              var rowTextLower = rowText.toLowerCase();
+              var cancellation = '';
+              if (rowTextLower.indexOf('free cancellation') >= 0) {
+                cancellation = 'Free cancellation';
+              } else if (rowTextLower.indexOf('non-refundable') >= 0) {
+                cancellation = 'Non-refundable';
               }
               
-              // Breakfast
-              var breakfast = "";
-              if (rowText.toLowerCase().indexOf("breakfast included") >= 0) {
-                breakfast = "Breakfast included";
-              } else if (rowText.toLowerCase().indexOf("room only") >= 0) {
-                breakfast = "Room only";
+              // Get breakfast info (prefer data-fltrs, fallback to DOM text)
+              var breakfast = '';
+              if (breakfastIncluded) {
+                breakfast = 'Breakfast included';
+              } else if (rowTextLower.indexOf('breakfast included') >= 0) {
+                breakfast = 'Breakfast included';
+              } else if (rowTextLower.indexOf('room only') >= 0) {
+                breakfast = 'Room only';
               }
               
-              // Occupancy
+              // Get occupancy
               var sleeps = null;
-              var occupancyEl = row ? row.querySelector('[class*="occupancy"], .hprt-occupancy-occupancy-info') : null;
+              var occupancyEl = row.querySelector('[class*="occupancy"], .hprt-occupancy-occupancy-info');
               if (occupancyEl) {
-                var occMatch = occupancyEl.textContent.match(/(\\d+)/);
-                sleeps = occMatch ? parseInt(occMatch[1]) : null;
+                var occMatch = (occupancyEl.textContent || '').match(/(\\d+)/);
+                sleeps = occMatch ? parseInt(occMatch[1], 10) : null;
               }
+              
+              // Build features array
+              var features = [];
+              if (breakfast) features.push(breakfast);
+              if (cancellation) features.push(cancellation);
               
               roomOptions.push({
-                name: name,
+                name: roomName,
                 price: price,
                 priceDisplay: priceDisplay,
                 sleeps: sleeps,
-                features: [],
+                features: features,
                 bedType: bedType,
                 cancellation: cancellation,
-                breakfast: breakfast
+                breakfast: breakfast,
+                roomTypeId: roomTypeId
               });
             }
             
-            // Strategy 2: If no rooms found, try data-block-id elements
+            // ============================================================
+            // STRATEGY 2: Fallback to DOM scraping if data attributes failed
+            // ============================================================
             if (roomOptions.length === 0) {
-              var blocks = document.querySelectorAll('[data-block-id]');
-              for (var i = 0; i < blocks.length && roomOptions.length < 10; i++) {
-                var block = blocks[i];
-                var blockText = block.textContent || "";
-                
-                // Look for any room name pattern
-                var nameEl = block.querySelector('a[class*="room"], span[class*="room-name"]');
-                var name = nameEl ? nameEl.textContent.trim() : "";
-                
-                if (!name) {
-                  // Try to extract from block text
-                  var lines = blockText.split('\\n').filter(function(l) { return l.trim().length > 0; });
-                  name = lines[0] ? lines[0].trim().slice(0, 50) : "";
-                }
+              var seenRooms = {};
+              var roomTypeLinks = document.querySelectorAll('.hprt-roomtype-link, a[class*="hprt-roomtype"]');
+              
+              for (var i = 0; i < roomTypeLinks.length && roomOptions.length < 10; i++) {
+                var roomLink = roomTypeLinks[i];
+                var name = roomLink.textContent ? roomLink.textContent.trim() : '';
                 
                 if (!name || name.length < 3 || seenRooms[name]) continue;
                 seenRooms[name] = true;
                 
-                var priceMatch = blockText.match(/[\\$€£¥]\\s*([\\d,]+)/);
-                var price = priceMatch ? parseInt(priceMatch[1].replace(/,/g, "")) : null;
+                var row = roomLink.closest('tr') || roomLink.closest('[data-block-id]') || roomLink.parentElement;
+                var rowText = row ? row.textContent || '' : '';
+                
+                // Try to find price
+                var price = null;
+                var priceDisplay = '';
+                var priceCell = row ? row.querySelector('.hprt-table-cell-price, [class*="price-block"], [class*="bui-price"]') : null;
+                if (priceCell) {
+                  var match = (priceCell.textContent || '').match(/[\\$€£¥]\\s*([\\d,]+)/);
+                  if (match) {
+                    price = parseInt(match[1].replace(/,/g, ''), 10);
+                    priceDisplay = match[0];
+                  }
+                }
+                
+                // Bed type
+                var bedType = '';
+                var bedEl = row ? row.querySelector('.hprt-roomtype-bed, [class*="bed-type"]') : null;
+                if (bedEl) {
+                  var bedText = bedEl.textContent || '';
+                  var bedLines = bedText.split('\\n').map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
+                  for (var k = 0; k < bedLines.length; k++) {
+                    if (bedLines[k].match(/(bed|queen|king|twin|double|single|sofa)/i)) {
+                      bedType = bedLines[k];
+                      break;
+                    }
+                  }
+                }
+                
+                // Cancellation and breakfast from text
+                var rowTextLower = rowText.toLowerCase();
+                var cancellation = '';
+                if (rowTextLower.indexOf('free cancellation') >= 0) {
+                  cancellation = 'Free cancellation';
+                } else if (rowTextLower.indexOf('non-refundable') >= 0) {
+                  cancellation = 'Non-refundable';
+                }
+                
+                var breakfast = '';
+                if (rowTextLower.indexOf('breakfast included') >= 0) {
+                  breakfast = 'Breakfast included';
+                } else if (rowTextLower.indexOf('room only') >= 0) {
+                  breakfast = 'Room only';
+                }
+                
+                // Occupancy
+                var sleeps = null;
+                var occupancyEl = row ? row.querySelector('[class*="occupancy"], .hprt-occupancy-occupancy-info') : null;
+                if (occupancyEl) {
+                  var occMatch = (occupancyEl.textContent || '').match(/(\\d+)/);
+                  sleeps = occMatch ? parseInt(occMatch[1], 10) : null;
+                }
                 
                 roomOptions.push({
                   name: name,
                   price: price,
-                  priceDisplay: priceMatch ? priceMatch[0] : "",
+                  priceDisplay: priceDisplay,
+                  sleeps: sleeps,
+                  features: [],
+                  bedType: bedType,
+                  cancellation: cancellation,
+                  breakfast: breakfast
+                });
+              }
+            }
+            
+            // ============================================================
+            // STRATEGY 3: Last resort - look for any data-block-id elements
+            // ============================================================
+            if (roomOptions.length === 0) {
+              var seenBlocks = {};
+              var blocks = document.querySelectorAll('[data-block-id]');
+              for (var i = 0; i < blocks.length && roomOptions.length < 10; i++) {
+                var block = blocks[i];
+                var blockId = block.getAttribute('data-block-id') || '';
+                if (!blockId || blockId === 'header_survey') continue;
+                
+                var blockText = block.textContent || '';
+                var nameEl = block.querySelector('a[class*="room"], span[class*="room-name"]');
+                var name = nameEl ? (nameEl.textContent || '').trim() : '';
+                
+                if (!name) {
+                  var lines = blockText.split('\\n').filter(function(l) { return l.trim().length > 0; });
+                  name = lines[0] ? lines[0].trim().slice(0, 50) : '';
+                }
+                
+                if (!name || name.length < 3 || seenBlocks[name]) continue;
+                seenBlocks[name] = true;
+                
+                var priceMatch = blockText.match(/[\\$€£¥]\\s*([\\d,]+)/);
+                var price = priceMatch ? parseInt(priceMatch[1].replace(/,/g, ''), 10) : null;
+                
+                roomOptions.push({
+                  name: name,
+                  price: price,
+                  priceDisplay: priceMatch ? priceMatch[0] : '',
                   sleeps: null,
                   features: [],
-                  bedType: "",
-                  cancellation: "",
-                  breakfast: ""
+                  bedType: '',
+                  cancellation: '',
+                  breakfast: ''
                 });
               }
             }
             
             // Check for "no availability" message
-            var bodyText = document.body.textContent || "";
+            var bodyText = document.body.textContent || '';
             var noAvailability = 
-              bodyText.indexOf("no availability") >= 0 ||
-              bodyText.indexOf("sold out") >= 0 ||
-              bodyText.indexOf("no rooms available") >= 0 ||
-              bodyText.indexOf("fully booked") >= 0 ||
-              bodyText.indexOf("We have no availability") >= 0;
+              bodyText.indexOf('no availability') >= 0 ||
+              bodyText.indexOf('sold out') >= 0 ||
+              bodyText.indexOf('no rooms available') >= 0 ||
+              bodyText.indexOf('fully booked') >= 0 ||
+              bodyText.indexOf('We have no availability') >= 0;
             
             return {
               hotelName: hotelName,
@@ -2158,6 +3584,52 @@ export class HotelBrowser {
             };
           })()
         `) as { hotelName: string; roomOptions: RoomOption[]; noAvailabilityDetected: boolean };
+
+        // Enrich room options with facilities from GraphQL API
+        // This provides detailed amenities (AC, TV, bathroom, etc.) per room type
+        if (result.roomOptions.length > 0) {
+          try {
+            const hotelId = await this.extractHotelId();
+            if (hotelId) {
+              const facilitiesMap = await this.fetchRoomFacilitiesGraphQL(hotelId, checkIn, checkOut);
+              
+              if (facilitiesMap.size > 0) {
+                // Merge facilities into room options based on roomTypeId
+                // Room type IDs are the first 9 digits of the full room ID (e.g., 652359501 -> 652359501)
+                for (const room of result.roomOptions) {
+                  if (room.roomTypeId) {
+                    // Try exact match first
+                    let facilities = facilitiesMap.get(room.roomTypeId);
+                    
+                    // If not found, the GraphQL returns full room IDs (e.g., 652359501)
+                    // while our roomTypeId might be just the prefix
+                    if (!facilities) {
+                      // Find a matching key that starts with our roomTypeId
+                      for (const [key, value] of facilitiesMap) {
+                        if (key.startsWith(room.roomTypeId) || room.roomTypeId.startsWith(key)) {
+                          facilities = value;
+                          break;
+                        }
+                      }
+                    }
+                    
+                    if (facilities) {
+                      room.amenities = facilities;
+                    }
+                  }
+                }
+                
+                logger.debug(
+                  { enrichedRooms: result.roomOptions.filter(r => r.amenities).length },
+                  'Enriched room options with GraphQL facilities'
+                );
+              }
+            }
+          } catch (error) {
+            // Non-fatal: continue without facilities enrichment
+            logger.debug({ error }, 'Failed to enrich rooms with GraphQL facilities');
+          }
+        }
 
         // Determine availability and lowest price
         const available = result.roomOptions.length > 0 && !result.noAvailabilityDetected;
@@ -2241,52 +3713,112 @@ export class HotelBrowser {
         await this.page!.keyboard.press("Escape");
         await this.page!.waitForTimeout(500);
         
-        // Get overall rating info from main page before opening modal
-        const mainPageData = await this.page!.evaluate(`
-          (function() {
-            var results = { hotelName: '', overallRating: null, totalReviews: 0, breakdown: {} };
-            
-            // Hotel name
-            var nameEl = document.querySelector('h2[class*="pp-header__title"], [data-testid="PropertyHeaderDesktop-wrapper"] h2, h2.d2fee87262');
-            results.hotelName = nameEl?.textContent?.trim() || '';
-            
-            // Overall rating and total reviews from review-score-component
-            var scoreComponent = document.querySelector('[data-testid="review-score-component"]');
-            if (scoreComponent) {
-              var text = scoreComponent.textContent || '';
-              // Extract score (e.g., "Scored 9.1 9.1..." -> 9.1)
-              var scoreMatch = text.match(/Scored\\s+([\\d.]+)/);
-              if (scoreMatch) {
-                results.overallRating = parseFloat(scoreMatch[1]);
+        // Try API extraction first for basic review data
+        // API provides: hotel name, overall rating, rating breakdown, and featured reviews
+        // Note: API reviews are limited to what's in cache (~6-10 reviews), sorted by newest
+        const apiData = await this.extractReviewsFromAPI();
+        
+        // Determine if we can use API data directly or need DOM fallback
+        // Use API if: we have enough reviews AND no special sorting/filtering is requested
+        const canUseApiOnly = apiData && 
+          apiData.reviews.length >= limit && 
+          sortBy === "recent" && 
+          !filterBy;
+        
+        if (canUseApiOnly) {
+          logger.debug("Using API extraction for reviews (sufficient data, no filters)");
+          
+          const reviewsResult = {
+            hotelName: apiData.hotelName,
+            overallRating: apiData.overallRating,
+            totalReviews: apiData.totalReviews,
+            ratingBreakdown: apiData.ratingBreakdown,
+            reviews: apiData.reviews.slice(0, limit),
+            url: cleanUrl,
+          };
+
+          await this.saveSession();
+          return reviewsResult;
+        }
+        
+        // Use API data for metadata if available, but get reviews from DOM
+        // This gives us accurate rating breakdown from API + more reviews from DOM
+        const baseData = apiData || {
+          hotelName: '',
+          overallRating: null as number | null,
+          totalReviews: 0,
+          ratingBreakdown: {
+            staff: null as number | null,
+            facilities: null as number | null,
+            cleanliness: null as number | null,
+            comfort: null as number | null,
+            valueForMoney: null as number | null,
+            location: null as number | null,
+            freeWifi: null as number | null,
+          },
+        };
+        
+        // If API didn't give us hotel info, get it from DOM
+        if (!baseData.hotelName) {
+          const mainPageData = await this.page!.evaluate(`
+            (function() {
+              var results = { hotelName: '', overallRating: null, totalReviews: 0, breakdown: {} };
+              
+              // Hotel name
+              var nameEl = document.querySelector('h2[class*="pp-header__title"], [data-testid="PropertyHeaderDesktop-wrapper"] h2, h2.d2fee87262');
+              results.hotelName = nameEl?.textContent?.trim() || '';
+              
+              // Overall rating and total reviews from review-score-component
+              var scoreComponent = document.querySelector('[data-testid="review-score-component"]');
+              if (scoreComponent) {
+                var text = scoreComponent.textContent || '';
+                var scoreMatch = text.match(/Scored\\s+([\\d.]+)/);
+                if (scoreMatch) {
+                  results.overallRating = parseFloat(scoreMatch[1]);
+                }
+                var reviewCountMatch = text.match(/([\\d,]+)\\s+reviews?/);
+                if (reviewCountMatch) {
+                  results.totalReviews = parseInt(reviewCountMatch[1].replace(/,/g, ''));
+                }
               }
-              // Extract total reviews (e.g., "1,043 reviews")
-              var reviewCountMatch = text.match(/([\\d,]+)\\s+reviews?/);
-              if (reviewCountMatch) {
-                results.totalReviews = parseInt(reviewCountMatch[1].replace(/,/g, ''));
-              }
-            }
-            
-            // Rating breakdown categories
-            var breakdownEls = document.querySelectorAll('[data-testid="review-subscore"]');
-            breakdownEls.forEach(function(el) {
-              var text = el.textContent?.trim() || '';
-              var parts = text.split(/\\s+/);
-              if (parts.length >= 2) {
-                var score = parseFloat(parts[parts.length - 1]);
-                var category = parts.slice(0, -1).join(' ').toLowerCase();
-                if (category.includes('staff')) results.breakdown.staff = score;
-                else if (category.includes('facilities')) results.breakdown.facilities = score;
-                else if (category.includes('cleanliness')) results.breakdown.cleanliness = score;
-                else if (category.includes('comfort')) results.breakdown.comfort = score;
-                else if (category.includes('value') || category.includes('money')) results.breakdown.valueForMoney = score;
-                else if (category.includes('location')) results.breakdown.location = score;
-                else if (category.includes('wifi') || category.includes('wi-fi')) results.breakdown.freeWifi = score;
-              }
-            });
-            
-            return results;
-          })()
-        `) as { hotelName: string; overallRating: number | null; totalReviews: number; breakdown: Record<string, number> };
+              
+              // Rating breakdown categories
+              var breakdownEls = document.querySelectorAll('[data-testid="review-subscore"]');
+              breakdownEls.forEach(function(el) {
+                var text = el.textContent?.trim() || '';
+                var parts = text.split(/\\s+/);
+                if (parts.length >= 2) {
+                  var score = parseFloat(parts[parts.length - 1]);
+                  var category = parts.slice(0, -1).join(' ').toLowerCase();
+                  if (category.includes('staff')) results.breakdown.staff = score;
+                  else if (category.includes('facilities')) results.breakdown.facilities = score;
+                  else if (category.includes('cleanliness')) results.breakdown.cleanliness = score;
+                  else if (category.includes('comfort')) results.breakdown.comfort = score;
+                  else if (category.includes('value') || category.includes('money')) results.breakdown.valueForMoney = score;
+                  else if (category.includes('location')) results.breakdown.location = score;
+                  else if (category.includes('wifi') || category.includes('wi-fi')) results.breakdown.freeWifi = score;
+                }
+              });
+              
+              return results;
+            })()
+          `) as { hotelName: string; overallRating: number | null; totalReviews: number; breakdown: Record<string, number> };
+          
+          baseData.hotelName = mainPageData.hotelName;
+          if (baseData.overallRating === null) baseData.overallRating = mainPageData.overallRating;
+          if (baseData.totalReviews === 0) baseData.totalReviews = mainPageData.totalReviews;
+          
+          // Fill in missing rating breakdown from DOM
+          if (baseData.ratingBreakdown.staff === null) baseData.ratingBreakdown.staff = mainPageData.breakdown.staff ?? null;
+          if (baseData.ratingBreakdown.facilities === null) baseData.ratingBreakdown.facilities = mainPageData.breakdown.facilities ?? null;
+          if (baseData.ratingBreakdown.cleanliness === null) baseData.ratingBreakdown.cleanliness = mainPageData.breakdown.cleanliness ?? null;
+          if (baseData.ratingBreakdown.comfort === null) baseData.ratingBreakdown.comfort = mainPageData.breakdown.comfort ?? null;
+          if (baseData.ratingBreakdown.valueForMoney === null) baseData.ratingBreakdown.valueForMoney = mainPageData.breakdown.valueForMoney ?? null;
+          if (baseData.ratingBreakdown.location === null) baseData.ratingBreakdown.location = mainPageData.breakdown.location ?? null;
+          if (baseData.ratingBreakdown.freeWifi === null) baseData.ratingBreakdown.freeWifi = mainPageData.breakdown.freeWifi ?? null;
+        }
+        
+        logger.debug("Using DOM extraction for reviews (need more reviews or filters)");
         
         // Click "Read all reviews" button to open reviews modal
         const readAllBtn = await this.page!.$('[data-testid="fr-read-all-reviews"], [data-testid="review-score-read-all"]');
@@ -2464,21 +3996,21 @@ export class HotelBrowser {
           })()
         `) as Review[];
         
-        // Build rating breakdown with proper null handling
+        // Build rating breakdown from baseData (populated from API or DOM)
         const ratingBreakdown: RatingBreakdown = {
-          staff: mainPageData.breakdown.staff ?? null,
-          facilities: mainPageData.breakdown.facilities ?? null,
-          cleanliness: mainPageData.breakdown.cleanliness ?? null,
-          comfort: mainPageData.breakdown.comfort ?? null,
-          valueForMoney: mainPageData.breakdown.valueForMoney ?? null,
-          location: mainPageData.breakdown.location ?? null,
-          freeWifi: mainPageData.breakdown.freeWifi ?? null,
+          staff: baseData.ratingBreakdown.staff,
+          facilities: baseData.ratingBreakdown.facilities,
+          cleanliness: baseData.ratingBreakdown.cleanliness,
+          comfort: baseData.ratingBreakdown.comfort,
+          valueForMoney: baseData.ratingBreakdown.valueForMoney,
+          location: baseData.ratingBreakdown.location,
+          freeWifi: baseData.ratingBreakdown.freeWifi,
         };
         
         const reviewsResult = {
-          hotelName: mainPageData.hotelName,
-          overallRating: mainPageData.overallRating,
-          totalReviews: mainPageData.totalReviews,
+          hotelName: baseData.hotelName,
+          overallRating: baseData.overallRating,
+          totalReviews: baseData.totalReviews,
           ratingBreakdown,
           reviews: reviews.slice(0, limit),
           url: cleanUrl,

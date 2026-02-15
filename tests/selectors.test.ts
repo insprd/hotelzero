@@ -216,10 +216,14 @@ describe('Booking.com Selector Health Check', () => {
       const href = await links[0].getAttribute('href');
       expect(href).toBeTruthy();
       
-      // Store URL for hotel details tests - ensure it's a full URL
+      // Store URL for hotel details tests - strip query params for cleaner URL
+      // The raw href has tracking params that can cause slow loads/timeouts
       if (href) {
-        TEST_HOTEL_URL = href.startsWith('http') ? href : `https://www.booking.com${href}`;
-        console.log(`Captured hotel URL for details tests: ${TEST_HOTEL_URL.substring(0, 80)}...`);
+        const fullUrl = href.startsWith('http') ? href : `https://www.booking.com${href}`;
+        // Extract just the base hotel URL without query params
+        const urlMatch = fullUrl.match(/(https:\/\/www\.booking\.com\/hotel\/[a-z]{2}\/[^?]+\.html)/i);
+        TEST_HOTEL_URL = urlMatch ? urlMatch[1] : fullUrl.split('?')[0];
+        console.log(`Captured hotel URL for details tests: ${TEST_HOTEL_URL}`);
       }
     });
   });
@@ -233,7 +237,8 @@ describe('Booking.com Selector Health Check', () => {
       }
       
       // Navigate to the hotel page captured from search results
-      await page.goto(TEST_HOTEL_URL, { waitUntil: 'networkidle', timeout: 30000 });
+      // Use domcontentloaded instead of networkidle - hotel pages have lots of async loading
+      await page.goto(TEST_HOTEL_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
       await page.waitForTimeout(3000);
       
       // Dismiss popups
