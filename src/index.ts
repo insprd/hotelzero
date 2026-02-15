@@ -54,7 +54,6 @@ const FindHotelsSchema = z.object({
   
   // Pagination
   limit: z.number().min(1).max(100).optional().describe("Maximum number of results to return (default: 25, max: 100)"),
-  offset: z.number().min(0).optional().describe("Number of results to skip for pagination (default: 0)"),
   
   // Rating & Price
   minRating: z.number().optional().describe("Minimum rating (6=Pleasant, 7=Good, 8=Very Good, 9=Wonderful)"),
@@ -243,7 +242,6 @@ const findHotelsInputSchema = {
     
     // Pagination
     limit: { type: "number", description: "Maximum results to return (default: 25, max: 100)", default: 25 },
-    offset: { type: "number", description: "Number of results to skip for pagination", default: 0 },
     
     // Property Type
     propertyType: { 
@@ -423,7 +421,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           currency: parsed.currency,
           sortBy: parsed.sortBy,
           limit: parsed.limit,
-          offset: parsed.offset,
         };
 
         // Build filters object from all parsed parameters
@@ -431,7 +428,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         
         // Copy all filter properties (exclude search params)
         const filterKeys = Object.keys(parsed).filter(k => 
-          !['destination', 'checkIn', 'checkOut', 'guests', 'rooms', 'currency', 'sortBy', 'limit', 'offset'].includes(k)
+          !['destination', 'checkIn', 'checkOut', 'guests', 'rooms', 'currency', 'sortBy', 'limit'].includes(k)
         );
         
         for (const key of filterKeys) {
@@ -481,22 +478,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ? `Filters: ${activeFilters.join(", ")}\n\n` 
           : "\n";
         
-        // Pagination info
-        const offset = parsed.offset || 0;
-        const displayLimit = parsed.limit || 25;
-        const paginationLine = offset > 0 
-          ? `Showing results ${offset + 1}-${offset + results.length} of available hotels\n\n`
-          : "";
-        
         const hotelList = results
-          .map((h, i) => formatHotelResult(h, i + offset))
+          .map((h, i) => formatHotelResult(h, i))
           .join("\n\n");
 
         return {
           content: [
             {
               type: "text",
-              text: header + filtersLine + paginationLine + hotelList,
+              text: header + filtersLine + hotelList,
             },
           ],
         };

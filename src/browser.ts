@@ -89,7 +89,6 @@ export interface HotelSearchParams {
   currency?: string; // Currency code (USD, EUR, GBP, etc.)
   sortBy?: "popularity" | "price_lowest" | "price_highest" | "rating" | "distance";
   limit?: number; // Max results to return (default: 25, max: 100)
-  offset?: number; // Number of results to skip (for pagination)
 }
 
 // Comprehensive filter interface based on all Booking.com filter codes
@@ -486,7 +485,7 @@ export class HotelBrowser {
   }
 
   private buildBookingUrl(params: HotelSearchParams, filters?: HotelFilters): string {
-    const { destination, checkIn, checkOut, guests, rooms, currency, sortBy, offset } = params;
+    const { destination, checkIn, checkOut, guests, rooms, currency, sortBy } = params;
     
     const url = new URL("https://www.booking.com/searchresults.html");
     url.searchParams.set("ss", destination);
@@ -495,11 +494,6 @@ export class HotelBrowser {
     url.searchParams.set("group_adults", guests.toString());
     url.searchParams.set("no_rooms", rooms.toString());
     url.searchParams.set("selected_currency", currency || "USD");
-    
-    // Pagination offset
-    if (offset && offset > 0) {
-      url.searchParams.set("offset", offset.toString());
-    }
     
     // Sort order
     if (sortBy) {
@@ -877,35 +871,44 @@ export class HotelBrowser {
   private async scrollToLoadMore(targetResults: number = 25): Promise<void> {
     if (!this.page) return;
 
-    // Calculate how many scroll iterations needed
-    // Each scroll typically loads ~15-25 more results
-    // We start with ~25, so to get to targetResults we need (targetResults - 25) / 20 more scrolls
-    const scrollsNeeded = Math.max(1, Math.ceil((targetResults - 25) / 20));
-    const maxScrolls = Math.min(scrollsNeeded, 5); // Cap at 5 scrolls to avoid excessive loading
-
-    // Scroll down to load more results
-    for (let i = 0; i < maxScrolls; i++) {
-      await this.page.evaluate(() => {
-        window.scrollBy(0, window.innerHeight);
-      });
+    // If we only need 25 or fewer, minimal scrolling
+    if (targetResults <= 25) {
+      // Just one scroll to ensure initial results are loaded
+      await this.page.evaluate(() => window.scrollBy(0, window.innerHeight));
       await this.page.waitForTimeout(1000);
+      await this.page.evaluate(() => window.scrollTo(0, 0));
+      return;
+    }
+
+    // For larger limits, we need to scroll and click "Load more" multiple times
+    // Booking.com loads ~25 results initially, then ~25 more per "Load more" click
+    const clicksNeeded = Math.ceil((targetResults - 25) / 25);
+    const maxClicks = Math.min(clicksNeeded, 4); // Cap at 4 clicks (~125 results max)
+
+    for (let i = 0; i < maxClicks; i++) {
+      // Scroll to bottom to trigger lazy loading and find "Load more" button
+      await this.page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+      await this.page.waitForTimeout(1500);
       
-      // Check if "Load more" button exists and click it
+      // Try to click "Load more" button
       try {
         const loadMoreBtn = await this.page.$('button[data-testid="load-more-results"]');
         if (loadMoreBtn) {
           await loadMoreBtn.click();
-          await this.page.waitForTimeout(1500);
+          await this.page.waitForTimeout(2000); // Wait for results to load
+        } else {
+          // No more "Load more" button, we've loaded all available results
+          break;
         }
       } catch {
-        // Ignore if button not found
+        // Button not found or click failed
+        break;
       }
     }
 
     // Scroll back to top
-    await this.page.evaluate(() => {
-      window.scrollTo(0, 0);
-    });
+    await this.page.evaluate(() => window.scrollTo(0, 0));
+    await this.page.waitForTimeout(500);
   }
 
   private async extractHotelDetails(): Promise<HotelResult[]> {
