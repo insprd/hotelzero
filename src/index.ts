@@ -7,7 +7,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { HotelBrowser, HotelSearchParams, HotelFilters, HotelResult, HotelSearchError, ErrorCodes } from "./browser.js";
+import { HotelBrowser, HotelSearchParams, HotelFilters, HotelResult, HotelDetails, HotelSearchError, ErrorCodes } from "./browser.js";
 
 // Property type enum
 const PropertyTypeEnum = z.enum([
@@ -150,6 +150,10 @@ const HotelDetailsSchema = z.object({
   url: z.string().describe("Booking.com URL for the hotel"),
 });
 
+const CompareHotelsSchema = z.object({
+  urls: z.array(z.string()).min(2).max(3).describe("Array of 2-3 Booking.com hotel URLs to compare"),
+});
+
 // Global browser instance (reuse for efficiency)
 let browser: HotelBrowser | null = null;
 
@@ -203,11 +207,163 @@ function formatHotelResult(hotel: HotelResult, index: number): string {
   return lines.join("\n");
 }
 
+function formatHotelComparison(hotels: HotelDetails[]): string {
+  const lines: string[] = [];
+  
+  // Header
+  lines.push("=" .repeat(60));
+  lines.push("HOTEL COMPARISON");
+  lines.push("=".repeat(60));
+  lines.push("");
+  
+  // Create comparison sections
+  const sections = [
+    {
+      title: "OVERVIEW",
+      rows: [
+        { label: "Name", getValue: (h: HotelDetails) => h.name || "Unknown" },
+        { label: "Rating", getValue: (h: HotelDetails) => h.rating ? `${h.rating}/10 ${h.ratingText}` : "N/A" },
+        { label: "Reviews", getValue: (h: HotelDetails) => h.reviewCount ? `${h.reviewCount.toLocaleString()} reviews` : "N/A" },
+        { label: "Stars", getValue: (h: HotelDetails) => h.starRating ? "★".repeat(h.starRating) : "N/A" },
+        { label: "Location", getValue: (h: HotelDetails) => h.address || h.locationInfo || "N/A" },
+      ],
+    },
+    {
+      title: "PRICING",
+      rows: [
+        { label: "Per Night", getValue: (h: HotelDetails) => h.priceDisplay || "N/A" },
+        { label: "Total", getValue: (h: HotelDetails) => h.totalPrice || "N/A" },
+      ],
+    },
+    {
+      title: "CHECK-IN/OUT",
+      rows: [
+        { label: "Check-in", getValue: (h: HotelDetails) => h.checkInTime || "N/A" },
+        { label: "Check-out", getValue: (h: HotelDetails) => h.checkOutTime || "N/A" },
+      ],
+    },
+    {
+      title: "PROPERTY HIGHLIGHTS",
+      rows: [
+        { label: "Highlights", getValue: (h: HotelDetails) => h.highlights || "N/A" },
+      ],
+    },
+  ];
+  
+  // Render each section
+  for (const section of sections) {
+    lines.push(`--- ${section.title} ---`);
+    lines.push("");
+    
+    for (const row of section.rows) {
+      const values = hotels.map(h => row.getValue(h));
+      lines.push(`${row.label}:`);
+      values.forEach((v, i) => {
+        lines.push(`  ${i + 1}. ${v}`);
+      });
+      lines.push("");
+    }
+  }
+  
+  // Facilities comparison
+  lines.push("--- TOP FACILITIES ---");
+  lines.push("");
+  hotels.forEach((h, i) => {
+    const facilities = h.popularFacilities.length > 0 ? h.popularFacilities : h.allFacilities;
+    lines.push(`${i + 1}. ${h.name}:`);
+    facilities.slice(0, 8).forEach(f => {
+      lines.push(`   • ${f}`);
+    });
+    lines.push("");
+  });
+  
+  // Find common and unique facilities
+  if (hotels.length >= 2) {
+    const allFacilitySets = hotels.map(h => {
+      const facilities = [...h.popularFacilities, ...h.allFacilities];
+      return new Set(facilities.map(f => f.toLowerCase()));
+    });
+    
+    // Find facilities in all hotels
+    const commonFacilities: string[] = [];
+    const firstHotelFacilities = [...hotels[0].popularFacilities, ...hotels[0].allFacilities];
+    for (const facility of firstHotelFacilities) {
+      const lowerFacility = facility.toLowerCase();
+      if (allFacilitySets.every(set => set.has(lowerFacility))) {
+        commonFacilities.push(facility);
+      }
+    }
+    
+    if (commonFacilities.length > 0) {
+      lines.push("--- COMMON FACILITIES ---");
+      commonFacilities.slice(0, 10).forEach(f => {
+        lines.push(`• ${f}`);
+      });
+      lines.push("");
+    }
+  }
+  
+  // Room types
+  const hasRoomTypes = hotels.some(h => h.roomTypes.length > 0);
+  if (hasRoomTypes) {
+    lines.push("--- ROOM TYPES ---");
+    lines.push("");
+    hotels.forEach((h, i) => {
+      lines.push(`${i + 1}. ${h.name}:`);
+      if (h.roomTypes.length > 0) {
+        h.roomTypes.slice(0, 3).forEach(r => {
+          lines.push(`   • ${r}`);
+        });
+      } else {
+        lines.push(`   (Room types not available)`);
+      }
+      lines.push("");
+    });
+  }
+  
+  // Quick verdict based on data
+  lines.push("--- QUICK COMPARISON ---");
+  lines.push("");
+  
+  // Best rating
+  const withRatings = hotels.filter(h => h.rating !== null);
+  if (withRatings.length > 0) {
+    const bestRated = withRatings.reduce((a, b) => (a.rating! > b.rating! ? a : b));
+    lines.push(`Highest Rated: ${bestRated.name} (${bestRated.rating}/10)`);
+  }
+  
+  // Best price
+  const withPrices = hotels.filter(h => h.pricePerNight !== null);
+  if (withPrices.length > 0) {
+    const cheapest = withPrices.reduce((a, b) => (a.pricePerNight! < b.pricePerNight! ? a : b));
+    lines.push(`Lowest Price: ${cheapest.name} (${cheapest.priceDisplay})`);
+  }
+  
+  // Most reviews
+  const withReviews = hotels.filter(h => h.reviewCount !== null);
+  if (withReviews.length > 0) {
+    const mostReviewed = withReviews.reduce((a, b) => (a.reviewCount! > b.reviewCount! ? a : b));
+    lines.push(`Most Reviews: ${mostReviewed.name} (${mostReviewed.reviewCount?.toLocaleString()})`);
+  }
+  
+  lines.push("");
+  lines.push("=".repeat(60));
+  
+  // Add URLs for reference
+  lines.push("BOOKING LINKS:");
+  hotels.forEach((h, i) => {
+    const shortUrl = h.url.split("?")[0];
+    lines.push(`${i + 1}. ${shortUrl}`);
+  });
+  
+  return lines.join("\n");
+}
+
 // Create MCP server
 const server = new Server(
   {
     name: "hotelzero",
-    version: "1.3.1",
+    version: "1.4.0",
   },
   {
     capabilities: {
@@ -397,6 +553,23 @@ Results are scored and ranked by how well they match the criteria.`,
           required: ["url"],
         },
       },
+      {
+        name: "compare_hotels",
+        description: "Compare 2-3 hotels side-by-side. Provide Booking.com URLs from search results to see a detailed comparison of ratings, prices, amenities, and facilities.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            urls: { 
+              type: "array", 
+              items: { type: "string" },
+              minItems: 2,
+              maxItems: 3,
+              description: "Array of 2-3 Booking.com hotel URLs to compare" 
+            },
+          },
+          required: ["urls"],
+        },
+      },
     ],
   };
 });
@@ -533,6 +706,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
+      case "compare_hotels": {
+        const parsed = CompareHotelsSchema.parse(args);
+        const hotels = await b.compareHotels(parsed.urls);
+        const comparison = formatHotelComparison(hotels);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: comparison,
+            },
+          ],
+        };
+      }
+
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
@@ -607,7 +795,7 @@ process.on("SIGTERM", async () => {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("HotelZero v1.3.1 running on stdio");
+  console.error("HotelZero v1.4.0 running on stdio");
 }
 
 main().catch((error) => {

@@ -274,6 +274,31 @@ export interface HotelResult {
   matchReasons?: string[];
 }
 
+// Detailed hotel info for comparison
+export interface HotelDetails {
+  name: string;
+  url: string;
+  rating: number | null;
+  ratingText: string;
+  reviewCount: number | null;
+  starRating: number | null;
+  address: string;
+  description: string;
+  highlights: string;
+  pricePerNight: number | null;
+  priceDisplay: string;
+  totalPrice: string;
+  checkInTime: string;
+  checkOutTime: string;
+  popularFacilities: string[];
+  allFacilities: string[];
+  roomTypes: string[];
+  photos: string[];
+  nearbyAttractions: string[];
+  guestReviewHighlights: string[];
+  locationInfo: string;
+}
+
 // Booking.com filter code mappings
 const FILTER_CODES = {
   // Property Types
@@ -1276,5 +1301,305 @@ export class HotelBrowser {
   async getPageContent(): Promise<string> {
     if (!this.page) throw new Error("Browser not initialized");
     return await this.page.content();
+  }
+
+  /**
+   * Get detailed hotel information for comparison
+   */
+  async getHotelDetailsForComparison(hotelUrl: string): Promise<HotelDetails> {
+    if (!this.page) {
+      throw new HotelSearchError(
+        "Browser not initialized. Call init() first.",
+        ErrorCodes.BROWSER_NOT_INITIALIZED,
+        false
+      );
+    }
+
+    return await retryWithBackoff(
+      async () => {
+        await this.enforceRateLimit();
+        
+        try {
+          await this.page!.goto(hotelUrl, { 
+            waitUntil: "networkidle",
+            timeout: 30000 
+          });
+        } catch (error) {
+          const err = error as Error;
+          if (err.message.includes("timeout") || err.message.includes("Timeout")) {
+            throw new HotelSearchError(
+              "Page load timed out.",
+              ErrorCodes.TIMEOUT,
+              true
+            );
+          }
+          throw new HotelSearchError(
+            `Navigation failed: ${err.message}`,
+            ErrorCodes.NAVIGATION_FAILED,
+            true
+          );
+        }
+        
+        await this.page!.waitForTimeout(2000);
+        await this.checkForBlocking();
+        await this.dismissPopups();
+
+        // Extract comprehensive hotel details using evaluate with string to avoid __name compilation issues
+        const details = await this.page!.evaluate(`
+          (function() {
+            function getText(selector) {
+              var el = document.querySelector(selector);
+              return el && el.textContent ? el.textContent.trim() : "";
+            }
+            
+            function getTexts(selector) {
+              var elements = document.querySelectorAll(selector);
+              var result = [];
+              for (var i = 0; i < elements.length; i++) {
+                var text = elements[i].textContent;
+                if (text) {
+                  text = text.trim();
+                  if (text.length > 0) result.push(text);
+                }
+              }
+              return result;
+            }
+            
+            function getUniqueTexts(selector) {
+              var texts = getTexts(selector);
+              var seen = {};
+              var result = [];
+              for (var i = 0; i < texts.length; i++) {
+                if (!seen[texts[i]]) {
+                  seen[texts[i]] = true;
+                  result.push(texts[i]);
+                }
+              }
+              return result;
+            }
+
+            // Name - h2 is cleaner than h1 on Booking.com property pages
+            var name = getText('h2');
+            if (!name) name = getText('h1').split('(')[0].trim(); // fallback, strip suffix
+
+            // Rating - parse from review-score-component which contains "Scored 7.4 7.4Rated good Good · 11 reviews"
+            var ratingEl = document.querySelector('[data-testid="review-score-component"]');
+            var ratingFullText = ratingEl ? ratingEl.textContent || "" : "";
+            
+            // Extract numeric rating (first number after "Scored")
+            var ratingMatch = ratingFullText.match(/Scored\\s+([\\d.]+)/i);
+            var rating = ratingMatch ? parseFloat(ratingMatch[1]) : null;
+            
+            // Extract rating description (Good, Excellent, etc.)
+            var descMatch = ratingFullText.match(/Rated\\s*\\w+\\s*(\\w+)/i);
+            var ratingDesc = descMatch ? descMatch[1] : "";
+            if (!ratingDesc) {
+              // Try alternate pattern
+              var altMatch = ratingFullText.match(/(Exceptional|Superb|Excellent|Very Good|Good|Pleasant|Review score)/i);
+              ratingDesc = altMatch ? altMatch[1] : "";
+            }
+            
+            // Review count - look for number followed by "review"
+            var reviewMatch = ratingFullText.match(/([\\d,]+)\\s*reviews?/i);
+            var reviewCount = reviewMatch ? parseInt(reviewMatch[1].replace(/,/g, "")) : null;
+
+            // Star rating (for hotels)
+            var starEl = document.querySelector('[data-testid="rating-stars"]');
+            var starCount = starEl ? starEl.querySelectorAll('span[class*="star"], svg').length : null;
+            // Sometimes stars are indicated by aria-label
+            if (!starCount) {
+              var starLabel = document.querySelector('[aria-label*="star"]');
+              if (starLabel) {
+                var labelMatch = starLabel.getAttribute('aria-label').match(/(\\d+)/);
+                starCount = labelMatch ? parseInt(labelMatch[1]) : null;
+              }
+            }
+
+            // Address - from header address wrapper, clean up extra content
+            var address = "";
+            var addressWrapper = document.querySelector('[data-testid="PropertyHeaderAddressDesktop-wrapper"]');
+            if (addressWrapper) {
+              // Get all spans and find the one with the actual address
+              var spans = addressWrapper.querySelectorAll('span');
+              for (var i = 0; i < spans.length; i++) {
+                var text = spans[i].textContent ? spans[i].textContent.trim() : "";
+                // Address typically contains comma-separated parts ending with country
+                if (text.length > 10 && text.indexOf(",") > 0) {
+                  // Cut off at common suffixes that indicate end of address
+                  var cutoffs = ["Excellent location", "Great location", "Good location", "Very good location", "show map", "– rated", "After booking"];
+                  for (var j = 0; j < cutoffs.length; j++) {
+                    var idx = text.indexOf(cutoffs[j]);
+                    if (idx > 0) {
+                      text = text.substring(0, idx).trim();
+                      break;
+                    }
+                  }
+                  if (text.length > 10) {
+                    address = text;
+                    break;
+                  }
+                }
+              }
+            }
+            if (!address) address = getText('[data-testid="property-header-location"]');
+
+            // Description
+            var description = getText('[data-testid="property-description"]');
+
+            // Property highlights (size, bathroom, etc.)
+            var highlights = getText('[data-testid="property-highlights"]');
+
+            // Price - look in the reservation/booking section
+            var priceDisplay = "";
+            var pricePerNight = null;
+            
+            // Try multiple price selectors
+            var priceSelectors = [
+              '[data-testid="price-and-discounted-price"]',
+              '[class*="prco-valign-middle-helper"]',
+              '[class*="bui-price-display__value"]',
+              'span[class*="price"]'
+            ];
+            
+            for (var i = 0; i < priceSelectors.length; i++) {
+              var priceEl = document.querySelector(priceSelectors[i]);
+              if (priceEl && priceEl.textContent) {
+                var text = priceEl.textContent.trim();
+                // Look for currency symbol followed by number
+                var match = text.match(/[\\$€£¥]\\s*([\\d,]+)/);
+                if (match) {
+                  priceDisplay = text;
+                  pricePerNight = parseInt(match[1].replace(/,/g, ""));
+                  break;
+                }
+              }
+            }
+
+            // Check-in/out times - try multiple approaches
+            var checkInTime = getText('[data-testid="check-in-time"]');
+            var checkOutTime = getText('[data-testid="check-out-time"]');
+            
+            // If not found, look in policies section
+            if (!checkInTime) {
+              var policyText = getText('[data-testid="policy-summary"]') || "";
+              var checkInMatch = policyText.match(/check-in[:\\s]*(\\d{1,2}:\\d{2})/i);
+              checkInTime = checkInMatch ? checkInMatch[1] : "";
+            }
+            if (!checkOutTime) {
+              var policyText = getText('[data-testid="policy-summary"]') || "";
+              var checkOutMatch = policyText.match(/check-out[:\\s]*(\\d{1,2}:\\d{2})/i);
+              checkOutTime = checkOutMatch ? checkOutMatch[1] : "";
+            }
+
+            // Popular facilities - from the wrapper, get unique spans
+            var facilitiesWrapper = document.querySelector('[data-testid="property-most-popular-facilities-wrapper"]');
+            var popularFacilities = [];
+            if (facilitiesWrapper) {
+              var spans = facilitiesWrapper.querySelectorAll('span');
+              var seen = {};
+              for (var i = 0; i < spans.length; i++) {
+                var text = spans[i].textContent ? spans[i].textContent.trim() : "";
+                // Skip labels like "Most popular amenities" and short items
+                if (text && text.length > 2 && text.length < 50 && !seen[text] && 
+                    text.indexOf("Most popular") === -1 && text.indexOf("amenities") === -1) {
+                  seen[text] = true;
+                  popularFacilities.push(text);
+                }
+              }
+            }
+            
+            // If still empty, try property-highlights
+            if (popularFacilities.length === 0 && highlights) {
+              // Parse highlights like "Private bathroomFree WifiShower..."
+              var items = highlights.split(/(?=[A-Z][a-z])/);
+              for (var i = 0; i < items.length; i++) {
+                var item = items[i].trim();
+                if (item && item.length > 2) popularFacilities.push(item);
+              }
+            }
+
+            // All facilities from facilities section
+            var allFacilities = getUniqueTexts('[data-testid="property-section-facilities"] li');
+            if (allFacilities.length === 0) {
+              allFacilities = getUniqueTexts('[data-testid="Property-Facilities-Tab-Content"] li');
+            }
+
+            // Room types
+            var roomTypes = getUniqueTexts('[data-testid="room-name"]');
+
+            // Photos from gallery
+            var photoEls = document.querySelectorAll('[data-testid="GalleryUnifiedDesktop-wrapper"] img, [class*="gallery"] img');
+            var photos = [];
+            var seenPhotos = {};
+            for (var i = 0; i < photoEls.length && photos.length < 5; i++) {
+              var src = photoEls[i].src;
+              if (src && src.indexOf("data:") === -1 && !seenPhotos[src]) {
+                seenPhotos[src] = true;
+                photos.push(src);
+              }
+            }
+
+            // Location info from map
+            var locationInfo = getText('[data-testid="map-entry-point-desktop"]');
+
+            return {
+              name: name,
+              rating: rating,
+              ratingText: ratingDesc,
+              reviewCount: reviewCount,
+              starRating: starCount,
+              address: address,
+              description: description.slice(0, 500),
+              highlights: highlights,
+              pricePerNight: pricePerNight,
+              priceDisplay: priceDisplay,
+              totalPrice: "",
+              checkInTime: checkInTime,
+              checkOutTime: checkOutTime,
+              popularFacilities: popularFacilities.slice(0, 15),
+              allFacilities: allFacilities.slice(0, 30),
+              roomTypes: roomTypes.slice(0, 5),
+              photos: photos,
+              nearbyAttractions: [],
+              guestReviewHighlights: [],
+              locationInfo: locationInfo
+            };
+          })()
+        `) as Omit<HotelDetails, 'url'>;
+
+        return {
+          ...details,
+          url: hotelUrl,
+        };
+      },
+      DEFAULT_RETRY_CONFIG,
+      (attempt, error, delayMs) => {
+        console.error(
+          `Get hotel details attempt ${attempt} failed: ${error.message}. Retrying in ${Math.round(delayMs / 1000)}s...`
+        );
+      }
+    );
+  }
+
+  /**
+   * Compare multiple hotels side-by-side
+   */
+  async compareHotels(hotelUrls: string[]): Promise<HotelDetails[]> {
+    if (hotelUrls.length < 2 || hotelUrls.length > 3) {
+      throw new HotelSearchError(
+        "Please provide 2-3 hotel URLs to compare",
+        "INVALID_INPUT",
+        false
+      );
+    }
+
+    const results: HotelDetails[] = [];
+    
+    for (const url of hotelUrls) {
+      const details = await this.getHotelDetailsForComparison(url);
+      results.push(details);
+    }
+
+    return results;
   }
 }
