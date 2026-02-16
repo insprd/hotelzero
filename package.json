@@ -9,7 +9,8 @@
     "hotelzero": "dist/index.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc",
@@ -35,7 +36,7 @@
     "ai",
     "claude"
   ],
-  "author": "",
+  "author": "Matt Legrand (https://github.com/insprd)",
   "license": "MIT",
   "engines": {
     "node": ">=18"
