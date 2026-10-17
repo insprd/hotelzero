@@ -1069,8 +1069,11 @@ export class HotelBrowser {
       "error 429",
     ];
     
+    // Booking's ordinary page scripts also contain terms such as "blocked".
+    // Classify access-denial messages from rendered text, not script contents.
+    const visibleText = (await this.page.locator("body").innerText()).toLowerCase();
     const isBlocked = blockIndicators.some(
-      indicator => pageContent.toLowerCase().includes(indicator)
+      indicator => visibleText.includes(indicator)
     );
     
     if (isBlocked || pageUrl.includes("blocked") || pageUrl.includes("error")) {
@@ -2803,84 +2806,15 @@ export class HotelBrowser {
   }
 
   async getHotelDetails(hotelUrl: string): Promise<Record<string, unknown>> {
-    if (!this.page) {
-      throw new HotelSearchError(
-        "Browser not initialized. Call init() first.",
-        ErrorCodes.BROWSER_NOT_INITIALIZED,
-        false
+    // Reuse the current API/DOM extractor used by comparisons rather than the
+    // obsolete pp-header/gallery selectors. Preserve the detail tool's field.
+    const details = await this.getHotelDetailsForComparison(hotelUrl);
+    if (!details.description && this.page) {
+      details.description = await this.page.evaluate(() =>
+        document.querySelector('[data-testid="property-description"]')?.textContent?.trim() || ""
       );
     }
-
-    return await retryWithBackoff(
-      async () => {
-        // Enforce rate limiting
-        await this.enforceRateLimit();
-        
-        try {
-          await this.page!.goto(hotelUrl, { 
-            waitUntil: "networkidle",
-            timeout: 30000 
-          });
-        } catch (error) {
-          const err = error as Error;
-          if (err.message.includes("timeout") || err.message.includes("Timeout")) {
-            throw new HotelSearchError(
-              "Page load timed out. The server may be slow or unavailable.",
-              ErrorCodes.TIMEOUT,
-              true
-            );
-          }
-          throw new HotelSearchError(
-            `Navigation failed: ${err.message}`,
-            ErrorCodes.NAVIGATION_FAILED,
-            true
-          );
-        }
-        
-        await this.page!.waitForTimeout(2000);
-        
-        // Check for blocking/CAPTCHA
-        await this.checkForBlocking();
-        
-        await this.dismissPopups();
-
-        // Extract detailed information from hotel page
-        return await this.page!.evaluate(() => {
-          const details: Record<string, unknown> = {};
-
-          // Hotel name
-          const nameEl = document.querySelector('h2[class*="pp-header"]');
-          details.name = nameEl?.textContent?.trim();
-
-          // Description
-          const descEl = document.querySelector('[data-testid="property-description"]');
-          details.description = descEl?.textContent?.trim();
-
-          // All facilities
-          const facilityEls = document.querySelectorAll('[data-testid="property-section-facilities"] li');
-          details.facilities = Array.from(facilityEls).map((el) => el.textContent?.trim());
-
-          // Photos
-          const photoEls = document.querySelectorAll('[data-testid="gallery-image"] img');
-          details.photos = Array.from(photoEls)
-            .slice(0, 5)
-            .map((el) => (el as HTMLImageElement).src);
-
-          // Popular facilities highlighted
-          const popularFacilities = document.querySelectorAll('[data-testid="property-most-popular-facilities"] span');
-          details.popularFacilities = Array.from(popularFacilities).map((el) => el.textContent?.trim());
-
-          return details;
-        });
-      },
-      DEFAULT_RETRY_CONFIG,
-      (attempt, error, delayMs) => {
-        logger.warn(
-          { attempt, error: error.message, retryInMs: delayMs },
-          "Get details attempt failed, retrying"
-        );
-      }
-    );
+    return { ...details, facilities: details.allFacilities };
   }
 
   async takeScreenshot(path: string): Promise<void> {
